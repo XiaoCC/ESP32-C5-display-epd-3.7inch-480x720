@@ -563,11 +563,12 @@ char *page_trips_with_status(const char *body)
     return status;
 }
 
-static bool fetch_trip_weather(const page_trip_t *trip, const char *today)
+static bool fetch_trip_weather(const page_trip_t *trip, const char *today, bool refresh)
 {
     page_trip_weather_t cached;
     char saved[11];
-    if (read_trip_weather(trip, &cached, saved) && !strcmp(saved, today)) return false;
+    const bool has_cache = read_trip_weather(trip, &cached, saved);
+    if (!refresh && has_cache && !strcmp(saved, today)) return false;
     char url[320];
     snprintf(url, sizeof(url), "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
         "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code"
@@ -581,22 +582,38 @@ static bool fetch_trip_weather(const page_trip_t *trip, const char *today)
     response[n] = 0;
     cJSON *json = cJSON_Parse(response);
     const cJSON *daily = cJSON_GetObjectItemCaseSensitive(json, "daily");
-    const cJSON *high = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(daily, "temperature_2m_max"), 0);
-    const cJSON *low = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(daily, "temperature_2m_min"), 0);
-    const cJSON *rain = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(daily, "precipitation_probability_max"), 0);
-    const cJSON *code = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(daily, "weather_code"), 0);
-    bool stored = false;
+    const cJSON *dates = cJSON_GetObjectItemCaseSensitive(daily, "time");
+    int day_index = 0;
+    const cJSON *date;
+    cJSON_ArrayForEach(date, dates) {
+        if (cJSON_IsString(date) && !strcmp(date->valuestring, trip->arrival_date)) break;
+        ++day_index;
+    }
+    if (!cJSON_IsArray(dates) || !date) {
+        ESP_LOGW(TAG, "Forecast response missing arrival date %s", trip->arrival_date);
+        cJSON_Delete(json);
+        return false;
+    }
+    const cJSON *high = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(daily, "temperature_2m_max"), day_index);
+    const cJSON *low = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(daily, "temperature_2m_min"), day_index);
+    const cJSON *rain = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(daily, "precipitation_probability_max"), day_index);
+    const cJSON *code = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(daily, "weather_code"), day_index);
+    bool changed = false;
     if (cJSON_IsNumber(high) && cJSON_IsNumber(low) && cJSON_IsNumber(code)) {
         char key[64], body[144], name[16];
         trip_weather_key(trip, key, sizeof(key));
         trip_weather_file(key, name, sizeof(name));
+        const int rain_chance = cJSON_IsNumber(rain) ? rain->valueint : -1;
         snprintf(body, sizeof(body), "%s\t%s %d %d %d %d", key, today,
-            high->valueint, low->valueint, cJSON_IsNumber(rain) ? rain->valueint : -1, code->valueint);
-        stored = page_sd_write(name, body) == ESP_OK;
-        if (stored) ESP_LOGI(TAG, "Saved destination forecast for %s", trip->arrival_date);
+            high->valueint, low->valueint, rain_chance, code->valueint);
+        if (page_sd_write(name, body) == ESP_OK) {
+            changed = !has_cache || cached.high != high->valueint || cached.low != low->valueint ||
+                cached.rain != rain_chance || cached.code != code->valueint;
+            ESP_LOGI(TAG, "Saved destination forecast for %s", trip->arrival_date);
+        }
     }
     cJSON_Delete(json);
-    return stored;
+    return changed;
 }
 
 static void fetch_trips(const struct tm *now, const char *today)
@@ -606,7 +623,7 @@ static void fetch_trips(const struct tm *now, const char *today)
     cJSON *json = page_sd_read("TRIPS.JSN", body, TRIPS_BYTES) == ESP_OK ? cJSON_Parse(body) : NULL;
     free(body);
     struct tm final_day = *now;
-    final_day.tm_mday += 6;
+    final_day.tm_mday += 7;
     mktime(&final_day);
     char end[11];
     strftime(end, sizeof(end), "%Y-%m-%d", &final_day);
@@ -620,7 +637,7 @@ static void fetch_trips(const struct tm *now, const char *today)
         if (!wifi_mgr_is_sta_up() || esp_timer_get_time() >= deadline) break;
         page_trip_t trip;
         if (parse_trip(item, &trip) && strcmp(trip.arrival_date, today) >= 0 &&
-                strcmp(trip.arrival_date, end) <= 0 && fetch_trip_weather(&trip, today)) {
+                strcmp(trip.arrival_date, end) <= 0 && fetch_trip_weather(&trip, today, false)) {
             char key[64];
             trip_weather_key(&trip, key, sizeof(key));
             visible_forecast_changed |= !strcmp(key, featured_key);
@@ -630,16 +647,30 @@ static void fetch_trips(const struct tm *now, const char *today)
     if (visible_forecast_changed) app_display_trip_data_changed();
 }
 
+enum {
+    PAGE_SYNC_NETWORK = 1u << 0,
+    PAGE_SYNC_TRIP_OPEN = 1u << 1,
+};
+
 static void sync_task(void *arg)
 {
     (void)arg;
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint32_t requests;
+        xTaskNotifyWait(0, UINT32_MAX, &requests, portMAX_DELAY);
         struct tm date;
         if (!wifi_mgr_is_sta_up() || !tf_card_is_mounted() || !dashboard_local_time(&date)) continue;
         char day[11], previous[11];
         strftime(day, sizeof(day), "%Y-%m-%d", &date);
-        if (!dashboard_weather_offline()) fetch_trips(&date, day);
+        if (!dashboard_weather_offline()) {
+            page_trip_t trip;
+            if ((requests & PAGE_SYNC_TRIP_OPEN) && page_trip_get(&date, &trip) &&
+                    !strcmp(trip.arrival_date, day) && fetch_trip_weather(&trip, day, true)) {
+                app_display_trip_data_changed();
+            }
+            if (requests & PAGE_SYNC_NETWORK) fetch_trips(&date, day);
+        }
+        if (!(requests & PAGE_SYNC_NETWORK)) continue;
         if (page_sd_read("HUPDATE.DAT", previous, sizeof(previous)) == ESP_OK && !strcmp(day, previous)) continue;
         if (page_sd_write("HUPDATE.DAT", day) != ESP_OK) continue;
         unsigned stored = 0;
@@ -655,7 +686,13 @@ static void sync_task(void *arg)
 
 void page_network_refresh(void)
 {
-    if (s_sync_task) xTaskNotifyGive(s_sync_task);
+    if (s_sync_task) xTaskNotify(s_sync_task, PAGE_SYNC_NETWORK, eSetBits);
+}
+
+void page_trip_opened(void)
+{
+    if (s_sync_task && wifi_mgr_is_sta_up())
+        xTaskNotify(s_sync_task, PAGE_SYNC_TRIP_OPEN, eSetBits);
 }
 
 esp_err_t page_data_init(void)

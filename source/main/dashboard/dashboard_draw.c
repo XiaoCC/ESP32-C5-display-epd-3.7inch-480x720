@@ -642,18 +642,23 @@ static void trip_layout(void)
     text(268, 195, "到达", 1, BLUE);
     text(28, 224, trip.depart, 4, BLACK);
     text(268, 224, trip.arrive, 4, BLACK);
-    text(225, 241, ">", 2, BLUE);
+    // A filled shaft and a stepped head stay legible on the six-color panel.
+    rect(229, 253, 27, 5, BLUE);
+    for (int column = 0; column < 13; ++column) {
+        rect(249 + column, 243 + column, 1, 25 - column * 2, BLUE);
+    }
     clipped_text(28, 305, trip.from, 2, 202, BLACK);
     clipped_text(268, 305, trip.to, 2, 184, BLACK);
     if (strcmp(trip.arrival_date, trip.date)) text(268, 347, trip.arrival_date, 1, BLUE);
     snprintf(line, sizeof(line), "%s %s", flight ? "登机口" : "检票口", trip.gate[0] ? trip.gate : "-");
-    clipped_text(28, 394, line, 1, 211, BLACK);
+    clipped_text(28, 388, line, 2, 211, BLACK);
     snprintf(line, sizeof(line), "座位 %s", trip.seat[0] ? trip.seat : "-");
-    clipped_text(251, 394, line, 1, 201, BLACK);
-    if (trip.note[0]) clipped_text(28, 431, trip.note, 1, 420, BLACK);
+    clipped_text(251, 388, line, 2, 201, BLACK);
+    if (trip.note[0]) clipped_text(28, 441, trip.note, 1, 420, BLACK);
     rect(28, 487, 424, 3, BLUE);
     text(28, 514, "目的地天气", 1, BLUE);
     clipped_text(231, 514, trip.city, 1, 221, BLACK);
+    text(28, 649, trip.arrival_date, 1, BLACK);
     page_trip_weather_t weather;
     if (page_trip_weather(&trip, &weather)) {
         weather_icon(75, 604, 34, weather.code);
@@ -663,7 +668,6 @@ static void trip_layout(void)
             snprintf(line, sizeof(line), "%s  降水 %d%%", weather_label(weather.code), weather.rain);
         else snprintf(line, sizeof(line), "%s", weather_label(weather.code));
         text(134, 626, line, 1, BLUE);
-        text(28, 649, weather.updated, 1, BLACK);
         text(337, 649, "OPEN-METEO", 1, BLACK);
     } else centered(240, 591, "暂无抵达日预报", 2, BLACK);
 }

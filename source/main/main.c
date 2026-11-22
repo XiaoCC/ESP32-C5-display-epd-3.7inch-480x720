@@ -145,6 +145,7 @@ static void show_mode(screen_mode_t mode)
 {
     if (mode == SCREEN_MODE_WEATHER) refresh_weather(false);
     draw_mode(mode);
+    if (mode == SCREEN_MODE_TRIP) page_trip_opened();
 }
 
 static void IRAM_ATTR pmic_irq_handler(void *arg)
@@ -247,7 +248,7 @@ static void screen_task(void *arg)
                 last_trip_cleanup = date;
                 const bool pruned = page_trip_prune(&day);
                 if ((changed_day || pruned) && !hidden && screen_rotation_current_mode() == SCREEN_MODE_TRIP)
-                    draw_mode(SCREEN_MODE_TRIP);
+                    show_mode(SCREEN_MODE_TRIP);
             }
         }
         if (previous.running && !hidden && !pairing && !screen_rotation_shortcut_active()) {
@@ -296,7 +297,7 @@ static void screen_task(void *arg)
             wifi_mgr_stop();
             if (pairing && !screen_rotation_hidden() && screen_rotation_current_mode() == SCREEN_MODE_COUNT) {
                 if (page_before_management == SCREEN_MODE_WEATHER) dashboard_weather_use_cache();
-                draw_mode(page_before_management);
+                show_mode(page_before_management);
             }
             pairing = false;
             last_switch = esp_timer_get_time();
@@ -337,7 +338,11 @@ static void screen_task(void *arg)
             const esp_err_t err = screen_rotation_toggle_shortcut(page, fallback);
             unlock_idle_display();
             if (err != ESP_OK) ESP_LOGW(TAG, "PWRON shortcut: %s", esp_err_to_name(err));
-            else ESP_LOGI(TAG, "PWRON single click: display %u", (unsigned)screen_rotation_current_mode());
+            else {
+                const screen_mode_t current = screen_rotation_current_mode();
+                if (current == SCREEN_MODE_TRIP) page_trip_opened();
+                ESP_LOGI(TAG, "PWRON single click: display %u", (unsigned)current);
+            }
             pairing = false;
             last_switch = esp_timer_get_time();
             continue;
@@ -401,7 +406,7 @@ static void screen_task(void *arg)
         if (manual && (screen_rotation_available_modes() & (1u << requested))) {
             show_mode(requested);
             last_switch = esp_timer_get_time();
-        } else if (!manual && (events & SCREEN_EVENT_TRIP_DATA) &&
+        } else if (!manual && !pairing && (events & SCREEN_EVENT_TRIP_DATA) &&
                 !screen_rotation_hidden() && screen_rotation_current_mode() == SCREEN_MODE_TRIP) {
             draw_mode(SCREEN_MODE_TRIP);
         }

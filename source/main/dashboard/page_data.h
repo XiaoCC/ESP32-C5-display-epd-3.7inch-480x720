@@ -42,5 +42,6 @@ bool page_lunar_get(const struct tm *now, page_lunar_t *lunar);
 esp_err_t page_lunar_upload(const char *content);
 bool page_history_get(const struct tm *now, page_history_t *history);
 void page_network_refresh(void);
+void page_trip_opened(void);
 
 #endif

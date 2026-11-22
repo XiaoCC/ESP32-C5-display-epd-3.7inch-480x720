@@ -10,7 +10,7 @@
       "address": "0x2000",
       "file": "bootloader-0x2000.bin",
       "size": 22128,
-      "sha256": "93cc38a1a28dcf8dd71e0088ad776e19f593cce56ab8064c2a59fd519310755b"
+      "sha256": "9e01b51250872ef8a8eda3fb424ec2a4601d1869c6113010e00ae72d3c54b1c8"
     },
     {
       "address": "0x8000",
@@ -21,8 +21,8 @@
     {
       "address": "0x10000",
       "file": "hueleaf-app-0x10000.bin",
-      "size": 2902736,
-      "sha256": "c4357e4b79b05fce0d48721027cf4e74a997e4398a8679a42886d1f15bf4ddd2"
+      "size": 2903184,
+      "sha256": "0c743bbac44f520780bbd61abe8214c306dd4a80f0f3e5a19eaad0fe8bc4c2c8"
     }
   ]
 }

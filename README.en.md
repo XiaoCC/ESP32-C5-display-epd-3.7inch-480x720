@@ -8,7 +8,7 @@ An ESP-IDF firmware fork for OSPTEK's HueLeaf Base, an ESP32-C5 board with 4 MB 
 
 - Send text and process photos in the device web console. Crop or rotate a picture, show it immediately, or save originals and display frames separately on SD. The gallery supports batch uploads, thumbnail selection and removal.
 - Use a monthly calendar, a seven-day weather clock (Yangzhou by default), a lunar date and literary quote page with daily almanac entries, or a to-do list with deadlines and adjustable type.
-- Save up to 12 manually entered train or flight itineraries. Choose a destination from the offline China place index, preview arrival-day weather when available, pin a trip or follow the automatic selection. Trips are pruned seven days after arrival. Weather fetched while online stays on SD for offline display.
+- Save up to 12 manually entered train or flight itineraries. Choose a destination from the offline China place index, preview arrival-day weather when available, pin a trip or follow the automatic selection. Trips are pruned seven days after arrival. The forecast is cached on SD for arrivals from today through seven days ahead. On the arrival date, opening the itinerary triggers a fresh forecast if online fetching is enabled and the device is connected. The weather section shows the arrival date.
 - Read On This Day events from a seven-day SD cache. Annual almanac files for 2026 and 2027 are bundled and can be written to the SD card.
 - Pick pages for timed rotation and set the interval in minutes. Set black-and-white or color per page. Both use a full-panel refresh, usually around 30 seconds. The clock updates when the page redraws.
 
