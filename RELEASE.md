@@ -1,0 +1,34 @@
+# GitHub 发布资料
+
+推荐仓库 `tankey33/ESP32-C5-display-epd-3.7inch-480x720`
+
+推荐标题 **HueLeaf Base 社区固件 · ESP32-C5 3.7 英寸六色墨水屏**
+
+推荐标签 `v2026.11.22`
+
+推荐 Topics `esp32-c5` `esp-idf` `e-paper` `eink` `epd037a02` `hueleaf`
+
+## 仓库简介
+
+ESP32-C5 六色墨水屏社区固件，支持离线日历、天气缓存、SD 相册、待办、行程与历史今天，附 Windows 和 macOS 刷机指南。
+
+Community firmware for the OSPTEK HueLeaf Base with offline calendar, cached weather, SD gallery, to-dos, itineraries and On This Day.
+
+## 可粘贴到 GitHub Release 的正文
+
+### HueLeaf Base 社区固件 v2026.11.22
+
+适配 ESP32-C5、4 MB Flash、3.7 英寸 480×720 EPD037A02 六色屏。包含 SD 相册、农历日签、待办、七天天气缓存、机票与高铁行程、目的地预报和历史今天。可按分钟轮播，也可设置电源键单击直达某页。
+
+下载 ZIP 后先读 README。原厂分区设备可只刷应用到 `0x10000`。完整安装所需的引导程序和分区表也已附上。刷机前请核对设备型号和各镜像的 SHA-256。
+
+Built with ESP-IDF v5.5.4. The ZIP includes source, flash images, checksums and instructions for Windows and macOS.
+
+基于鱼鹰光电 HueLeaf Base。欢迎分享上游尚未实现的功能方案、实机测试结果或自行开发的固件。 [原项目](https://gitee.com/osptek/devkit-hueleaf_base)
+
+## 上传流程
+
+1. 解压后，把内层目录中的内容放在 GitHub 仓库根目录。保留许可证和第三方声明。
+2. 使用标签 `v2026.11.22` 创建 GitHub Release，将完整 ZIP 作为 Release 附件上传。
+3. 核查仓库首页的中英文 README、固件路径，以及 Release 附件的下载链接。
+
