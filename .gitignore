@@ -1,0 +1,6 @@
+/.venv/
+/source/build/
+/hueleaf-local-backup.bin
+/current-partitions.bin
+__pycache__/
+

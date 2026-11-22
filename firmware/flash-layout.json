@@ -1,0 +1,28 @@
+{
+  "chip": "esp32c5",
+  "flash_size": "4MB",
+  "flash_mode": "dio",
+  "flash_freq": "80m",
+  "esp_idf": "v5.5.4",
+  "upstream_commit": "a34b55b168e0e6e12fc6215c6706e7a850e2d6a4",
+  "images": [
+    {
+      "address": "0x2000",
+      "file": "bootloader-0x2000.bin",
+      "size": 22128,
+      "sha256": "93cc38a1a28dcf8dd71e0088ad776e19f593cce56ab8064c2a59fd519310755b"
+    },
+    {
+      "address": "0x8000",
+      "file": "partition-table-0x8000.bin",
+      "size": 3072,
+      "sha256": "47b4a1809909f1c636f07a6c57f8c6094a4f1ff8e0280d0428021358b8156c23"
+    },
+    {
+      "address": "0x10000",
+      "file": "hueleaf-app-0x10000.bin",
+      "size": 2902736,
+      "sha256": "c4357e4b79b05fce0d48721027cf4e74a997e4398a8679a42886d1f15bf4ddd2"
+    }
+  ]
+}
