@@ -15,6 +15,8 @@
 #include "panel_lut.h"
 #include "pin_map.h"
 #include "panel_profile.h"
+#include "screen_rotation.h"
+#include "wifi_mgr.h"
 
 static const char *TAG = "screen";
 
@@ -33,6 +35,11 @@ typedef struct {
 
 static screen_ctx_t s_ctx;
 static uint32_t s_display_generation = 1;
+static uint32_t s_refresh_count;
+uint32_t screen_driver_refresh_count(void)
+{
+    return __atomic_load_n(&s_refresh_count, __ATOMIC_RELAXED);
+}
 uint32_t screen_driver_generation(void)
 {
     return __atomic_load_n(&s_display_generation, __ATOMIC_RELAXED);
@@ -75,6 +82,7 @@ static esp_err_t wait_refresh(void)
         vTaskDelay(1);
     }
     ESP_RETURN_ON_ERROR(wait_busy(), TAG, "DRF busy");
+    (void)__atomic_add_fetch(&s_refresh_count, 1, __ATOMIC_RELAXED);
     ESP_LOGI(TAG, "DRF busy %ums",
              (unsigned)((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS));
     return ESP_OK;
@@ -382,7 +390,9 @@ esp_err_t screen_driver_clear(screen_upload_report_t *report)
 {
     if (!report) return ESP_ERR_INVALID_ARG;
     memset(report, 0, sizeof(*report));
-    return fill_screen(SCREEN_COLOR_WHITE, report);
+    const esp_err_t err = fill_screen(SCREEN_COLOR_WHITE, report);
+    if (err == ESP_OK) __atomic_store_n(&s_refresh_count, 0, __ATOMIC_RELAXED);
+    return err;
 }
 
 esp_err_t screen_driver_show_frame(const uint8_t *frame, size_t len)
@@ -421,12 +431,40 @@ esp_err_t screen_driver_show_frame(const uint8_t *frame, size_t len)
 /* All consumers hold the display and board SPI locks. The callback must not
  * re-enter the display driver. A short read is valid; zero/oversized reads fail.
  * Hash only when upload evidence is requested; boot QR avoids that extra work. */
+/* 图标只叠加到送屏数据，不写回照片、文本缓存或上传校验。 */
+static void stamp_wifi(uint8_t *bytes, size_t size, size_t offset, unsigned rotation)
+{
+    const int width = rotation % 180 ? 720 : 480;
+    for (size_t i = 0; i < size; ++i) {
+        const size_t index = offset + i;
+        const int x = 479 - (int)(index / 360);
+        const int y = (int)(index % 360) * 2;
+        for (int bit = 0; bit < 2; ++bit) {
+            const int py = y + bit;
+            const int lx = rotation == 90 ? py : rotation == 270 ? 719 - py : rotation == 180 ? 479 - x : x;
+            const int ly = rotation == 90 ? 479 - x : rotation == 270 ? x : rotation == 180 ? 719 - py : py;
+            if (lx < width - 44 || lx >= width - 8 || ly < 8 || ly >= 38) continue;
+            const int dx = lx - (width - 26), dy = 34 - ly;
+            const int radius = dx * dx + dy * dy;
+            const bool ink = radius <= 6 || (dy > 0 && dx >= -dy && dx <= dy &&
+                ((radius >= 49 && radius <= 81) || (radius >= 144 && radius <= 196) ||
+                 (radius >= 289 && radius <= 361)));
+            const unsigned shift = bit ? 0 : 4;
+            const unsigned color = ink ? SCREEN_COLOR_BLACK : SCREEN_COLOR_WHITE;
+            bytes[i] = (bytes[i] & ~(0xFu << shift)) | (color << shift);
+        }
+    }
+}
+
 static esp_err_t stream_bytes(uint8_t *buffer, size_t capacity, size_t remaining,
                               screen_frame_read_cb_t read_cb, void *context,
                               uint32_t *sent_fnv)
 {
     uint32_t hash = 2166136261U;
     size_t sent = 0;
+    const size_t offset = SCREEN_FRAME_BYTES - remaining;
+    const bool wifi = wifi_mgr_management_active() && wifi_mgr_is_sta_up();
+    const unsigned rotation = screen_rotation_render_orientation();
     while (remaining > 0) {
         const size_t limit = remaining < capacity ? remaining : capacity;
         size_t received = 0;
@@ -435,6 +473,7 @@ static esp_err_t stream_bytes(uint8_t *buffer, size_t capacity, size_t remaining
         if (sent_fnv) {
             for (size_t i = 0; i < received; ++i) hash = (hash ^ buffer[i]) * 16777619U;
         }
+        if (wifi) stamp_wifi(buffer, received, offset + sent, rotation);
         ESP_RETURN_ON_ERROR(write_data(buffer, received), TAG, "stream SPI");
         remaining -= received;
         sent += received;

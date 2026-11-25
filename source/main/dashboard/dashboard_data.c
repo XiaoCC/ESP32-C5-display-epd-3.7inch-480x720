@@ -1,4 +1,5 @@
 #include "dashboard.h"
+#include "net_sync.h"
 #include "page_data.h"
 
 #include "cJSON.h"
@@ -114,7 +115,7 @@ bool dashboard_weather_ready(void)
 
 bool dashboard_weather_is_live(void)
 {
-    return __atomic_load_n(&s_weather_live, __ATOMIC_ACQUIRE);
+    return wifi_mgr_is_sta_up() && __atomic_load_n(&s_weather_live, __ATOMIC_ACQUIRE);
 }
 
 static uint32_t location_hash(const char *body)
@@ -372,7 +373,11 @@ void dashboard_weather_restore(void)
     if (read_setting("weather_offline", &offline, &offline_size) == ESP_OK)
         __atomic_store_n(&s_weather_offline, offline == 1, __ATOMIC_RELEASE);
     size_t attempt_size = sizeof(s_weather_attempt_day);
-    (void)read_setting("weather_attempt", &s_weather_attempt_day, &attempt_size);
+    uint32_t legacy_attempt = 0;
+    if (read_setting("weather_success", &s_weather_attempt_day, &attempt_size) != ESP_OK) {
+        attempt_size = sizeof(legacy_attempt);
+        (void)read_setting("weather_attempt", &legacy_attempt, &attempt_size);
+    }
     char body[WEATHER_LOCATION_BYTES];
     const esp_err_t err = dashboard_location_get(body, sizeof(body));
     const bool use_default = err == ESP_ERR_NVS_NOT_FOUND;
@@ -405,6 +410,9 @@ void dashboard_weather_restore(void)
     struct tm last;
     if (!s_weather_attempt_day && last_fetch >= EARLIEST_TIME && localtime_r(&last_fetch, &last)) {
         s_weather_attempt_day = (last.tm_year + 1900) * 10000 + (last.tm_mon + 1) * 100 + last.tm_mday;
+        // 旧键只是尝试标记，必须由有效缓存时间佐证才能迁移。
+        if (legacy_attempt == s_weather_attempt_day)
+            (void)write_setting("weather_success", &s_weather_attempt_day, sizeof(s_weather_attempt_day));
     }
     s_default_name = use_default;
     __atomic_store_n(&s_weather_ready, true, __ATOMIC_RELEASE);
@@ -421,6 +429,7 @@ static void sync_rtc(struct timeval *value)
     };
     (void)pcf8563_set_time(&rtc);
     __atomic_store_n(&s_clock_synced_at, (uint32_t)value->tv_sec, __ATOMIC_RELEASE);
+    net_sync_clock_valid();
 }
 
 void dashboard_clock_start(void)
@@ -456,14 +465,15 @@ void dashboard_clock_sync_stop(void)
     esp_netif_sntp_deinit();
 }
 
-bool dashboard_weather_claim_today(void)
+bool dashboard_weather_due(bool record_success)
 {
     struct tm local;
     if (!dashboard_local_time(&local)) return false;
     const uint32_t today = (local.tm_year + 1900) * 10000 + (local.tm_mon + 1) * 100 + local.tm_mday;
+    if (!record_success) return s_weather_attempt_day != today;
     if (s_weather_attempt_day == today) return false;
-    s_weather_attempt_day = today;
-    const esp_err_t err = write_setting("weather_attempt", &today, sizeof(today));
+    const esp_err_t err = write_setting("weather_success", &today, sizeof(today));
+    if (err == ESP_OK) s_weather_attempt_day = today;
     if (err != ESP_OK) ESP_LOGW(TAG, "Weather attempt date save failed: %s", esp_err_to_name(err));
     return true;
 }
@@ -736,7 +746,16 @@ static esp_err_t load_open_meteo(double lat, double lon, char *buffer, weather_d
     return ESP_OK;
 }
 
-esp_err_t dashboard_weather_fetch(int64_t deadline)
+static bool weather_has_seven_days(const weather_data_t *weather)
+{
+    for (int i = 0; i < WEATHER_DAYS; ++i) {
+        if (weather->daily[i].low == WEATHER_MISSING || weather->daily[i].high == WEATHER_MISSING ||
+                weather->daily[i].code == WEATHER_MISSING) return false;
+    }
+    return true;
+}
+
+esp_err_t dashboard_weather_fetch(int64_t deadline, bool *changed)
 {
     __atomic_store_n(&s_weather_live, false, __ATOMIC_RELEASE);
     if (!wifi_mgr_is_sta_up() || time(NULL) < EARLIEST_TIME) return ESP_ERR_INVALID_STATE;
@@ -758,15 +777,16 @@ esp_err_t dashboard_weather_fetch(int64_t deadline)
         .location = location_hash(use_default ? dashboard_default_location() : buffer),
     };
     weather_data_t *next = &cached.weather;
-    const esp_err_t err = station[0] ? load_nmc(station, buffer, next, deadline)
+    esp_err_t err = station[0] ? load_nmc(station, buffer, next, deadline)
         : load_open_meteo(lat, lon, buffer, next, deadline);
+    if (station[0] && (err != ESP_OK || !weather_has_seven_days(next)) && esp_timer_get_time() < deadline)
+        err = load_open_meteo(lat, lon, buffer, next, deadline);
     free(buffer);
     if (err != ESP_OK) return err;
+    if (!weather_has_seven_days(next)) return ESP_ERR_NOT_FINISHED;
 
-    screen_rotation_lock();
     wifi_mgr_confirm_internet();
     if (revision != __atomic_load_n(&s_location_revision, __ATOMIC_ACQUIRE)) {
-        screen_rotation_unlock();
         return ESP_ERR_INVALID_STATE;
     }
     cached.fetched_at = (uint32_t)time(NULL);
@@ -774,6 +794,12 @@ esp_err_t dashboard_weather_fetch(int64_t deadline)
     if (save_err == ESP_OK) ESP_LOGI(TAG, "Weather cache saved to " WEATHER_SD_FILE);
     else save_err = write_setting("weather_v2", &cached, sizeof(cached));
     if (save_err != ESP_OK) ESP_LOGW(TAG, "weather cache save failed: %s", esp_err_to_name(save_err));
+    screen_rotation_lock();
+    if (revision != __atomic_load_n(&s_location_revision, __ATOMIC_ACQUIRE)) {
+        screen_rotation_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    *changed = !dashboard_weather_ready() || memcmp(&s_weather, next, sizeof(s_weather)) != 0;
     s_weather = *next;
     s_default_name = use_default;
     if (!use_default) memcpy(s_weather_name, bitmap, sizeof(s_weather_name));
@@ -781,7 +807,7 @@ esp_err_t dashboard_weather_fetch(int64_t deadline)
     __atomic_store_n(&s_weather_live, true, __ATOMIC_RELEASE);
     screen_rotation_unlock();
     ESP_LOGI(TAG, "weather loaded from %s, %02d:%02d", next->nmc ? "NMC" : "Open-Meteo", next->hour, next->minute);
-    return ESP_OK;
+    return save_err;
 }
 
 const weather_data_t *dashboard_weather_data(void)

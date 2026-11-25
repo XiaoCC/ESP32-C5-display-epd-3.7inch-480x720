@@ -4,7 +4,7 @@
 
 推荐标题 **HueLeaf Base 社区固件 · ESP32-C5 3.7 英寸六色墨水屏**
 
-推荐标签 `v2026.11.22.1`
+推荐标签 `v2026.11.25.1`
 
 推荐 Topics `esp32-c5` `esp-idf` `e-paper` `eink` `epd037a02` `hueleaf`
 
@@ -16,9 +16,11 @@ Community firmware for the OSPTEK HueLeaf Base with offline calendar, cached wea
 
 ## 可粘贴到 GitHub Release 的正文
 
-### HueLeaf Base 社区固件 v2026.11.22.1
+### HueLeaf Base 社区固件 v2026.11.25.1
 
 适配 ESP32-C5、4 MB Flash、3.7 英寸 480×720 EPD037A02 六色屏。包含 SD 相册、农历日签、待办、七天天气缓存、机票与高铁行程、目的地预报和历史今天。可按分钟轮播，也可设置电源键单击直达某页。
+
+本次更新包括独立联网同步任务、Wi-Fi 租约、逐日历史缓存回补、同步诊断、可校准六色处理和后台资源拆分。旧版缓存和原厂 4 MB 分区布局保留。实机的断网回补、配网切换、色板与耗电有待复测。
 
 下载 ZIP 后先读 README。原厂分区设备可只刷应用到 `0x10000`。完整安装所需的引导程序和分区表也已附上。刷机前请核对设备型号和各镜像的 SHA-256。
 
@@ -29,6 +31,10 @@ Built with ESP-IDF v5.5.4. The ZIP includes source, flash images, checksums and 
 ## 上传流程
 
 1. 解压后，把内层目录中的内容放在 GitHub 仓库根目录。保留许可证和第三方声明。
-2. 使用标签 `v2026.11.22.1` 创建 GitHub Release，将完整 ZIP 作为 Release 附件上传。
+2. 使用标签 `v2026.11.25.1` 创建 GitHub Release，将完整 ZIP 作为 Release 附件上传。
 3. 核查仓库首页的中英文 README、固件路径，以及 Release 附件的下载链接。
 
+
+### v2026.11.25.1 预发布
+
+加入实验性 OKLab 量化、色板取样和 SD 校验存储。合成基准下经典保持默认。

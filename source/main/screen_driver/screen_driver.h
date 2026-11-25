@@ -47,6 +47,7 @@ typedef struct {
     bool completed;
 } screen_upload_report_t;
 uint32_t screen_driver_generation(void);
+uint32_t screen_driver_refresh_count(void);
 typedef enum {
     SCREEN_UPLOAD_RECEIVING, SCREEN_UPLOAD_REFRESH,
 } screen_upload_phase_t;

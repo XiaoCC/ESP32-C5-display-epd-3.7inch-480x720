@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 bool web_server_screen_busy(void);
+bool web_server_request_active(void);
 void web_server_note_activity(void);
 uint32_t web_server_idle_ms(void);
 

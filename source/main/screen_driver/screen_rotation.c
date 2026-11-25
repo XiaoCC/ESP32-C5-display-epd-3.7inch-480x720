@@ -626,6 +626,20 @@ static esp_err_t show_mode(screen_mode_t mode, const char *requested)
     return err;
 }
 
+static unsigned s_render_rotation = 360;
+
+unsigned screen_rotation_render_orientation(void)
+{
+    return s_render_rotation < 360 ? s_render_rotation : screen_rotation_get();
+}
+
+esp_err_t screen_rotation_redraw_current(void)
+{
+    if (s_mode >= SCREEN_MODE_COUNT) return ESP_ERR_INVALID_STATE;
+    if (s_mode >= SAVED_MODE_COUNT) return dashboard_show(s_mode, screen_rotation_get());
+    return replay_image(screen_rotation_get(), s_mode);
+}
+
 esp_err_t screen_rotation_show_mode(screen_mode_t mode)
 {
     return show_mode(mode, NULL);
@@ -733,13 +747,15 @@ static void rotation_worker(void *arg)
             ESP_LOGI(TAG, "GPIO28 redraw steps=%u target=%u", steps, target);
             esp_err_t err = ESP_OK;
             if (steps) {
+                s_render_rotation = target;
                 if (screen_rotation_hidden()) err = ESP_OK;
                 else if (s_cache.valid && s_cache.generation == screen_driver_generation()) err = replay_image(target, s_mode);
-                
+
                 else if (s_mode >= SAVED_MODE_COUNT && s_mode < SCREEN_MODE_COUNT) err = dashboard_show(s_mode, target);
                 else if (s_ui_current) err = screen_ui_redraw_rotation(target);
                 else if (s_blank_current) err = ESP_OK;
                 else { err = ESP_ERR_INVALID_STATE; ESP_LOGE(TAG, "no current image cache; flash partition table and upload again"); }
+                s_render_rotation = 360;
                 if (err == ESP_OK) {
                     __atomic_store_n(&s_rotation, target, __ATOMIC_RELEASE);
                     if (__atomic_add_fetch(&s_epoch, 1, __ATOMIC_ACQ_REL) == 0)

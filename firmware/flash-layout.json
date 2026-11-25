@@ -21,8 +21,9 @@
     {
       "address": "0x10000",
       "file": "hueleaf-app-0x10000.bin",
-      "size": 2903184,
-      "sha256": "0c743bbac44f520780bbd61abe8214c306dd4a80f0f3e5a19eaad0fe8bc4c2c8"
+      "size": 2768784,
+      "sha256": "fdc98f3448094a65ade6196a8e3d499b95244e9615a50e4afe925441cfb3ccdf"
     }
-  ]
+  ],
+  "version": "v2026.11.25.1"
 }

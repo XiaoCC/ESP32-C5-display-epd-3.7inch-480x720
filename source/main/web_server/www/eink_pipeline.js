@@ -1,4 +1,6 @@
-/* Six-ink browser dithering and the OTP full-frame transport. */
+/* 浏览器六色流程：sRGB 转线性光、降噪及色域投影、就近选墨色和可调扩散。
+ * 预览和打包使用同一组墨色 ID，校准 RGB 仅模拟面板观感，不修改驱动 LUT。
+ * 浏览器优先使用 Worker，环境不支持时回退到分段执行。 */
 (function (root, factory) {
   const api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
@@ -29,11 +31,13 @@
     const v = i / 255;
     return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
   });
-  const palette = COLORS.map(c => {
+  function buildPalette(colors) { return COLORS.map((c, i) => {
+    c = {...c, css: colors?.[i] || c.css};
     const rgb = [1, 3, 5].map(i => parseInt(c.css.slice(i, i + 2), 16));
     const lin = rgb.map(v => linear[v]);
     return { ...c, rgb, lin, luminance: .2126 * lin[0] + .7152 * lin[1] + .0722 * lin[2] };
-  });
+  }); }
+  const palette = buildPalette();
   const validInk = id => Number.isInteger(id) && (id === 0 || id === 1 || id === 2 || id === 3 || id === 5 || id === 6);
   const MODES = Object.freeze({ fast: .55, standard: .85, best: 1 });
   const canceledError = () => Object.assign(new Error('预览已更新'), { name: 'AbortError' });
@@ -41,7 +45,7 @@
   // Project unrepresentable source colors to the six-ink linear RGB hull.
   // This removes impossible residuals BEFORE diffusion; representable mixtures
   // retain full error gain. Coordinates use the same weights as ink selection.
-  function sixInkHull(style) {
+  function sixInkHull(style, palette) {
     const w=(style==='illustration'?[1,1,1]:[.3,.5,.2]).map(Math.sqrt);
     const points=palette.map(c=>c.lin.map((v,i)=>v*w[i])),faces=[];
     for(let i=0;i<6;i++)for(let j=i+1;j<6;j++)for(let k=j+1;k<6;k++) {
@@ -110,32 +114,100 @@
   }
   // Only two error rows are kept. Full-strength linear-light diffusion preserves
   // the mean ink coverage for gray, pink and other spatially mixed colors.
-  function logicalSize(){return panelRotation%180?{width:720,height:480}:{width:480,height:720};} function* quantizeSteps(rgba, options = {}) { const {width:WIDTH,height:HEIGHT}=logicalSize();
+  const TO_SRGB = Uint8Array.from({length:4097}, (_, i) => {
+    const v = i / 4096;
+    return Math.round(255 * (v <= .0031308 ? 12.92*v : 1.055*v**(1/2.4)-.055));
+  });
+  const luma = (r,g,b) => .2126*r + .7152*g + .0722*b;
+  const PRESETS = {
+    photo: { levels:.55, saturation:1.13, gamma:.96, sharp:.24, protect:.8 },
+    illustration: { levels:.6, saturation:1.21, gamma:1, sharp:.16, protect:.35 },
+    document: { levels:.7, saturation:0, gamma:1, sharp:.55, protect:0 },
+    portrait: { levels:.3, saturation:1.04, gamma:.94, sharp:.12, protect:1 },
+  };
+
+  function preprocess(input, width, height, preset) {
+    const cfg = PRESETS[preset];
+    if (!cfg) return input;
+    const n = width * height, luminance = new Float32Array(n);
+    const histogram = new Uint32Array(256);
+    const output = new Uint8ClampedArray(input.length);
+    for (let i = 0; i < n; i++) {
+      const k = i*4, a = input[k+3]/255;
+      const y = luma(linear[input[k]], linear[input[k+1]], linear[input[k+2]])*a + 1-a;
+      luminance[i] = y;
+      histogram[Math.floor(y*255)]++;
+    }
+    const percentile = target => {
+      let count = 0;
+      for (let i = 0; i < 256; i++) {
+        count += histogram[i];
+        if (count >= target*n) return i/255;
+      }
+      return 1;
+    };
+    const lo = percentile(.015), hi = percentile(.985);
+    const levels = hi-lo > .2 ? cfg.levels : 0;
+    for (let i = 0; i < n; i++) {
+      const k = i*4, alpha = input[k+3]/255, y = luminance[i], x = i%width;
+      const r=input[k], g=input[k+1], b=input[k+2];
+      const skin = r > 65 && r > g && g > b && r-b > 14 ? cfg.protect : 0;
+      const blur = (luminance[x ? i-1 : i] + luminance[x+1 < width ? i+1 : i] +
+        luminance[i >= width ? i-width : i] + luminance[i+width < n ? i+width : i])/4;
+      const level = levels ? clamp((y-lo)/(hi-lo),0,1) : y;
+      const detail = clamp((y-blur)*cfg.sharp, -.12, .12) * (1-skin*.55);
+      const mapped = clamp((y+(level-y)*levels)**cfg.gamma + detail, 0, 1);
+      for (let c = 0; c < 3; c++) {
+        const source = linear[input[k+c]]*alpha + 1-alpha;
+        const sat = cfg.saturation + (1-cfg.saturation)*skin;
+        output[k+c] = TO_SRGB[Math.round(clamp(mapped + (source-y)*sat, 0, 1)*4096)];
+      }
+      output[k+3] = 255;
+    }
+    return output;
+  }
+
+  function logicalSize(){return panelRotation%180?{width:720,height:480}:{width:480,height:720};} function* quantizeLegacy(rgba, options = {}) { const {width:WIDTH,height:HEIGHT}=logicalSize();
     const { gray = false, quality = 'best', style = 'photo', canceled = () => false } = options;
     if (!Object.hasOwn(MODES, quality)) throw new Error('未知混色质量');
     if (!['photo', 'illustration', 'flat'].includes(style)) throw new Error('未知呈现风格');
     if (!rgba || rgba.length !== WIDTH * HEIGHT * 4) throw new Error('裁剪图尺寸必须为 480×720');
+    rgba = preprocess(rgba, WIDTH, HEIGHT, options.preset);
     const denoise = options.denoise ??'off';
     if (!['off','balanced','strong'].includes(denoise)) throw new Error('未知六色降噪等级');
+    const colors = options.colors;
+    const palette = Array.isArray(colors) && colors.length === 6 &&
+      colors.every(color => /^#[0-9a-f]{6}$/i.test(color)) ? buildPalette(colors) : buildPalette();
+    const algorithm = options.algorithm || 'floyd';
+    const strength = clamp(Number(options.strength ?? 100), 0, 100) / 100;
+    const cap = clamp(Number(options.errorCap ?? .55), .05, 1);
+    const bayer = [0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5];
+    const kernels = {
+      floyd: [[1,0,7/16],[-1,1,3/16],[0,1,5/16],[1,1,1/16]],
+      atkinson: [[1,0,1/8],[2,0,1/8],[-1,1,1/8],[0,1,1/8],[1,1,1/8],[0,2,1/8]],
+      stucki: [[1,0,8/42],[2,0,4/42],[-2,1,2/42],[-1,1,4/42],[0,1,8/42],[1,1,4/42],[2,1,2/42],
+        [-2,2,1/42],[-1,2,2/42],[0,2,4/42],[1,2,2/42],[2,2,1/42]],
+    };
+    const kernel = kernels[algorithm];
     const clean = style !== 'flat' && denoise !== 'off';
     const strong = denoise === 'strong';
     const filtered = clean ? new Float32Array(WIDTH*3) : null;
-    const hull = clean && !gray ? sixInkHull(style) : null, projected = clean ? new Float64Array(3) : null;
+    const hull = clean && !gray ? sixInkHull(style, palette) : null, projected = clean ? new Float64Array(3) : null;
     const range = clean ? Float32Array.from({length:256},(_,d)=>d>(strong?48:32)?0:Math.exp(-d*d/(2*(strong?20:12)**2))) : null;
     const inks = gray ? palette.slice(0, 2) : palette;
     const mono = gray;
     const gain = style === 'flat' ? 0 : (gray ? 1 : MODES[quality]);
     const ids = new Uint8Array(WIDTH * HEIGHT);
     const preview = new Uint8ClampedArray(ids.length * 4);
-    let current = gain ? new Float32Array((WIDTH + 2) * 3) : null;
-    let next = gain ? new Float32Array(current.length) : null;
+    const rows = gain && kernel ? Array.from({length:3}, () => new Float32Array((WIDTH+4)*3)) : null;
     for (let y = 0; y < HEIGHT; y++) {
       if (canceled()) throw canceledError();
       if(clean) sixColorRow(rgba,y,filtered,range);
-      const dir = y & 1 ? -1 : 1;
+      const dir = options.serpentine !== false && (y & 1) ? -1 : 1;
+      const current = rows?.[0];
       for (let step = 0; step < WIDTH; step++) {
         const x = dir === 1 ? step : WIDTH - 1 - step;
-        const i = y * WIDTH + x, e = (x + 1) * 3, src = i * 4;
+        const i = y * WIDTH + x, e = (x + 2) * 3, src = i * 4;
         const alpha = rgba[src + 3] / 255;
         let r = linear[rgba[src]] * alpha + (1 - alpha);
         let g = linear[rgba[src + 1]] * alpha + (1 - alpha);
@@ -152,7 +224,11 @@
         const neutralBias=clean && !pixelMono ? 1-colorGain : 0;
         if(hull && !neutral) {projectSixColor(r,g,b,hull,projected);[r,g,b]=projected;}
         if (gray || neutral) r = g = b = .2126 * r + .7152 * g + .0722 * b;
-        if (gain) {
+        if (gain && algorithm === 'bayer') {
+          const offset = (bayer[(y & 3)*4 + (x & 3)] / 16 - .47) * .27 * strength * gain;
+          r += offset; g += offset; b += offset;
+        }
+        if (current) {
           if(pixelMono) {const v=.2126*current[e]+.7152*current[e+1]+.0722*current[e+2];r+=v;g+=v;b+=v;}
           else {r+=current[e];g+=current[e+1];b+=current[e+2];}
         }
@@ -169,25 +245,193 @@
         ids[i] = best.id;
         preview[src] = best.rgb[0]; preview[src + 1] = best.rgb[1];
         preview[src + 2] = best.rgb[2]; preview[src + 3] = 255;
-        if (gain) {
+        if (rows) {
           const luminanceError=.2126*(r-best.lin[0])+.7152*(g-best.lin[1])+.0722*(b-best.lin[2]);
           for (let c = 0; c < 3; c++) {
             const value = c === 0 ? r : c === 1 ? g : b;
             let residual=value-(pixelMono ? best.luminance : best.lin[c]);
             if(clean && !pixelMono) residual=luminanceError+(residual-luminanceError)*colorGain;
-            const error = clamp(residual, -1, 1) * (pixelMono ? 1 : gain);
-            current[e + dir * 3 + c] += error * 7 / 16;
-            next[e - dir * 3 + c] += error * 3 / 16;
-            next[e + c] += error * 5 / 16;
-            next[e + dir * 3 + c] += error / 16;
+            const error = clamp(residual, -cap, cap) * strength * gain;
+            for (const [dx, dy, weight] of kernel) rows[dy][e + dir * dx * 3 + c] += error * weight;
           }
         }
       }
-      if (gain) { [current, next] = [next, current]; next.fill(0); }
-      if ((y & 15) === 15) yield;
+      if (rows) { const row = rows.shift(); row.fill(0); rows.push(row); }
+      if ((y & 15) === 15) yield (y + 1) / HEIGHT;
     }
     return { ids, preview };
   }
+  // 反射色估计值，作为校准起点。设备色号沿用 OTP 协议。
+  const PANEL_COLORS = Object.freeze(['#373735','#b9b8ad','#c2a33b','#aa4436','#426896','#4b7951']);
+  function toLab(r,g,b) {
+    const l=Math.cbrt(.4122214708*r+.5363325363*g+.0514459929*b);
+    const m=Math.cbrt(.2119034982*r+.6806995451*g+.1073969566*b);
+    const s=Math.cbrt(.0883024619*r+.2817188376*g+.6299787005*b);
+    return [.2104542553*l+.793617785*m-.0040720468*s,
+      1.9779984951*l-2.428592205*m+.4505937099*s,.0259040371*l+.7827717662*m-.808675766*s];
+  }
+  function fromLab(L,a,b) {
+    const l=(L+.3963377774*a+.2158037573*b)**3;
+    const m=(L-.1055613458*a-.0638541728*b)**3;
+    const s=(L-.0894841775*a-1.291485548*b)**3;
+    return [4.0767416621*l-3.3077115913*m+.2309699292*s,
+      -1.2684380046*l+2.6097574011*m-.3413193965*s,-.0041960863*l-.7034186147*m+1.707614701*s];
+  }
+  const TETRA = [[0,1,2,3],[0,1,2,5],[0,1,5,4],[0,1,4,3]];
+  const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+  const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+  const subtract=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
+  let lastGamut;
+  function gamutFor(inks) {
+    const key=inks.map(ink=>ink.css).join();
+    if(lastGamut?.key===key) return lastGamut;
+    const origin=inks[0].lin;
+    const matrices=TETRA.map((tetra)=>{
+      const [a,b,c]=tetra.slice(1).map(i=>subtract(inks[i].lin,origin));
+      const rows=[cross(b,c),cross(c,a),cross(a,b)];
+      const determinant=dot(a,rows[0]);
+      return Math.abs(determinant)<1e-9 ? null : rows.map(row=>row.map(x=>x/determinant));
+    });
+    const locate=(r,g,b)=>{
+      r-=origin[0];g-=origin[1];b-=origin[2];
+      for(let i=0;i<4;i++) {
+        const m=matrices[i]; if(!m) continue;
+        const a=m[0][0]*r+m[0][1]*g+m[0][2]*b;
+        const c=m[1][0]*r+m[1][1]*g+m[1][2]*b;
+        const d=m[2][0]*r+m[2][1]*g+m[2][2]*b;
+        if(Math.min(a,c,d)>=-1e-5 && a+c+d<=1.00001) return i;
+      }
+      return -1;
+    };
+    const table=new Int8Array(32768);
+    for(let r=0;r<32;r++)for(let g=0;g<32;g++)for(let b=0;b<32;b++)
+      table[(r*32+g)*32+b]=locate(r/31,g/31,b/31);
+    return lastGamut={key,locate,table};
+  }
+  const KERNELS={
+    floyd:[[1,0,7],[-1,1,3],[0,1,5],[1,1,1]],
+    sierra:[[1,0,5],[2,0,3],[-2,1,2],[-1,1,4],[0,1,5],[1,1,4],[2,1,2],[-1,2,2],[0,2,3],[1,2,2]],
+    stucki:[[1,0,8],[2,0,4],[-2,1,2],[-1,1,4],[0,1,8],[1,1,4],[2,1,2],[-2,2,1],[-1,2,2],[0,2,4],[1,2,2],[2,2,1]],
+    jarvis:[[1,0,7],[2,0,5],[-2,1,3],[-1,1,5],[0,1,7],[1,1,5],[2,1,3],[-2,2,1],[-1,2,3],[0,2,5],[1,2,3],[2,2,1]],
+  };
+  // 固定种子的高通阈值纹理，压低随机纹理的低频成分。
+  const threshold=(()=>{
+    let seed=20261125;
+    const white=Float32Array.from({length:4096},()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296-.5;});
+    return white.map((v,i)=>v-.25*(white[(i&~63)|((i+1)&63)]+white[(i&~63)|((i-1)&63)]+white[(i+64)&4095]+white[(i-64)&4095]));
+  })();
+
+  function* quantizeV2(rgba,o) {
+    const {width,height}=logicalSize(), size=width*height;
+    if(rgba?.length!==size*4) throw new Error('裁剪图尺寸必须匹配屏幕');
+    const inks=buildPalette(o.colors || PANEL_COLORS);
+    const gamut=gamutFor(inks), labs=inks.map(i=>toLab(...i.lin));
+    const input=new Float32Array(size*3), hist=new Uint32Array(256);
+    const preset=o.engine || 'fine', quality=o.quality||'best';
+    const settings=o.adjust||{};
+    const hi=(settings.highlights||0)/100, sh=(settings.shadows||0)/100;
+    const exp=2**((settings.exposure||0)/50);
+    const brightness=(settings.brightness||0)/220;
+    const contrast=1+(settings.contrast||0)/100;
+    const saturation=1+(settings.saturation||0)/100;
+    for(let y=0;y<height;y++){
+      if(o.canceled?.()) throw canceledError();
+      for(let x=0;x<width;x++){
+        const i=y*width+x,k=i*4,j=i*3,alpha=rgba[k+3]/255;
+        const sensor=[0,1,2].map(c=>linear[rgba[k+c]]*alpha+1-alpha);
+        let l=luma(...sensor);
+        const mapped=clamp((l*exp-.25)*contrast+.25+brightness+sh*.45*(1-l)**2+hi*.45*l*l,0,1);
+        for(let c=0;c<3;c++) input[j+c]=clamp(mapped+(sensor[c]-l)*saturation,0,1);
+        hist[Math.round(mapped*255)]++;
+      }
+      if((y&31)===31) yield .2*(y+1)/height;
+    }
+    const percentile=q=>{let sum=0;for(let i=0;i<256;i++){sum+=hist[i];if(sum>=q*size)return i/255;}return 1;};
+    const low=percentile(.01),high=percentile(.99);
+    const black=inks[0].luminance, white=inks[1].luminance;
+    const typ=o.tone==='off'?0:o.tone==null||o.tone==='auto'?.82:clamp(Number(o.tone),0,1);
+    const n=clamp(Number(o.dotGain ?? 1),1,2);
+    const domain=inks.map(ink=>ink.lin.map(v=>v**(1/n)));
+    const rows=Array.from({length:3},()=>new Float32Array((width+4)*3));
+    const ids=new Uint8Array(size),preview=new Uint8ClampedArray(size*4);
+    const taps=KERNELS[o.algorithm]||KERNELS.floyd;
+    const weight=taps.reduce((sum,t)=>sum+t[2],0);
+    const noise=quality==='fast'?0:Number(o.noise??(preset==='sharp'?.08:.16));
+    const edge=quality==='best'?Number(o.edge??.6):0;
+    const vivid=Number(o.vivid??(preset==='vivid'?1.28:1));
+    const sharpen=Number(o.sharpness??(preset==='sharp'?.6:.35));
+    const local=Number(o.localContrast??(preset==='vivid'?.3:.4));
+    const wl=Number(o.wL??1),wc=Number(o.wC??.7);
+    const at=(x,y)=>{const j=(clamp(y,0,height-1)*width+clamp(x,0,width-1))*3;return luma(input[j],input[j+1],input[j+2]);};
+    for(let y=0;y<height;y++){
+      if(o.canceled?.())throw canceledError();
+      const dir=y&1?-1:1;
+      for(let step=0;step<width;step++){
+        const x=dir===1?step:width-1-step,i=y*width+x,j=i*3,e=(x+2)*3;
+        const l=at(x,y), left=at(x-1,y),right=at(x+1,y),up=at(x,y-1),down=at(x,y+1);
+        const base=(left+right+up+down)/4;
+        const grad=Math.hypot(right-left,down-up);
+        const z=high-low>.12?clamp((l-low)/(high-low),0,1):l;
+        const knee=z*z*(3-2*z);
+        const toned=clamp(l+typ*(black+(white-black)*(.87*z+.13*knee)-l)
+          +clamp((l-base)*(sharpen*.19+local*.08),-.025,.025),0,1);
+        let [L,a,b]=toLab(input[j]+toned-l,input[j+1]+toned-l,input[j+2]+toned-l);
+        const hue=Math.atan2(b,a)*180/Math.PI;
+        const skin=o.skin!==false&&hue>30&&hue<80&&Math.hypot(a,b)>.025&&L>.42&&L<.86;
+        const sat=skin?1+(vivid-1)*.25:vivid;
+        a*=sat;b*=sat;
+        L=clamp(L,labs[0][0],labs[1][0]);
+        let rgb=fromLab(L,a,b);
+        let tetra=gamut.locate(...rgb);
+        if(tetra<0&&!o.gray){
+          // 沿同亮度的黑白轴压缩色度；非中性校准色板仍存在可用轴。
+          const t=clamp((L-labs[0][0])/(labs[1][0]-labs[0][0]||1),0,1);
+          const axis=inks[0].lin.map((v,c)=>v+t*(inks[1].lin[c]-v));
+          const axisLab=toLab(...axis);
+          let bottom=0,top=1, best=axis;
+          for(let k=0;k<7;k++){
+            const f=(bottom+top)/2;
+            const probe=fromLab(axisLab[0],axisLab[1]+(a-axisLab[1])*f,axisLab[2]+(b-axisLab[2])*f);
+            if(gamut.locate(...probe)>=0){bottom=f;best=probe;}else top=f;
+          }
+          rgb=best;tetra=gamut.locate(...rgb);
+        }
+        if(o.gray)rgb=[toned,toned,toned];
+        const nearAxis=o.gray||Math.max(...rgb)-Math.min(...rgb)<.026;
+        const value=rgb.map((v,c)=>clamp(v,0,1)**(1/n)+rows[0][e+c]);
+        const query=toLab(...value.map(v=>clamp(v,0,1)**n));
+        if(tetra<0){
+          const u=rgb.map(v=>Math.round(clamp(v,0,1)*31));
+          tetra=gamut.table[(u[0]*32+u[1])*32+u[2]];
+        }
+        const candidates=nearAxis?[0,1]:TETRA[tetra]||[0,1,2,3,4,5];
+        query[0]+=threshold[(y&63)*64+(x&63)]*noise*.16/(1+grad*8);
+        let best=candidates[0],cost=Infinity;
+        for(const k of candidates){
+          const q=labs[k], d=wl*(query[0]-q[0])**2+wc*((query[1]-q[1])**2+(query[2]-q[2])**2)
+            +(skin&&(k===4||k===5)?.010:0);
+          if(d<cost){cost=d;best=k;}
+        }
+        ids[i]=inks[best].id;
+        preview.set(inks[best].rgb,i*4);preview[i*4+3]=255;
+        const keep=1-clamp(grad/.24,0,1)*edge;
+        for(let c=0;c<3;c++){
+          const err=clamp(value[c]-domain[best][c],-.45,.45)*keep/weight;
+          for(const [dx,dy,w] of taps)rows[dy][e+dir*dx*3+c]+=err*w;
+        }
+      }
+      const row=rows.shift();row.fill(0);rows.push(row);
+      if((y&15)===15)yield .2+.8*(y+1)/height;
+    }
+    return {ids,preview};
+  }
+
+  function* quantizeSteps(rgba, options={}) {
+    if(!options.engine||options.engine==='legacy')
+      return yield* quantizeLegacy(rgba,options);
+    return yield* quantizeV2(rgba,options);
+  }
+
   function quantize(rgba, options) {
     const it = quantizeSteps(rgba, options);
     let step;
@@ -195,10 +439,30 @@
     return step.value;
   }
   async function quantizeAsync(rgba, options) {
+    if (typeof window !== 'undefined' && typeof Worker !== 'undefined') {
+      try {
+        return await new Promise((resolve, reject) => {
+          const worker = new Worker('/eink_worker.js');
+          const finish = (fn, value) => { worker.terminate(); fn(value); };
+          worker.onerror = event => { event.preventDefault(); finish(reject, new Error('Worker 无法处理图片')); };
+          worker.onmessage = ({data}) => {
+            if (options?.canceled?.()) return finish(reject, canceledError());
+            if (data.error) return finish(reject, new Error(data.error));
+            if (data.progress !== undefined) options?.onProgress?.(data.progress);
+            else finish(resolve, data);
+          };
+          const { canceled, onProgress, ...settings } = options || {};
+          worker.postMessage({rgba, settings, rotation: panelRotation});
+        });
+      } catch (error) {
+        if (error.name === 'AbortError') throw error;
+      }
+    }
     const it = quantizeSteps(rgba, options);
     for (;;) {
       const step = it.next();
       if (step.done) return step.value;
+      options?.onProgress?.(step.value);
       await new Promise(resolve => setTimeout(resolve, 0));
     }
   }
@@ -221,10 +485,10 @@
     }
     return { rotationEpoch, body, counts, format: FORMAT, quality, pass: 0, checksum: checksum(body) };
   }
-  function previewIds(ids) {
+  function previewIds(ids, colors) {
     if (!(ids instanceof Uint8Array) || ids.length !== WIDTH * HEIGHT) throw new Error('像素数量错误');
     const lookup = [];
-    for (const color of palette) lookup[color.id] = color.rgb;
+    for (const color of colors ? buildPalette(colors) : palette) lookup[color.id] = color.rgb;
     const preview = new Uint8ClampedArray(ids.length * 4);
     for (let i = 0; i < ids.length; i++) {
       const rgb = lookup[ids[i]];
@@ -328,6 +592,6 @@
     return completed;
   }
   return Object.freeze({ WIDTH, HEIGHT, FRAME_BYTES, FORMAT, COLORS,
-    setPanelRotation, quantize, quantizeAsync, checksum, makeFrame,
-    previewIds, composeRegion, verifyBaseline, sendFrame, clearScreen });
+    setPanelRotation, quantize, quantizeAsync, quantizeSteps, toLab, fromLab, PANEL_COLORS, checksum, makeFrame,
+    previewIds, composeRegion, verifyBaseline, sendFrame, waitForJob, clearScreen });
 });

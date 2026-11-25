@@ -23,6 +23,8 @@ typedef struct {
 
 typedef struct {
     char date[11], text[273];
+    uint32_t fetched_at;
+    bool domestic_source;
     int year;
 } page_history_t;
 
@@ -40,8 +42,11 @@ bool page_trip_get(const struct tm *now, page_trip_t *trip);
 bool page_trip_weather(const page_trip_t *trip, page_trip_weather_t *weather);
 bool page_lunar_get(const struct tm *now, page_lunar_t *lunar);
 esp_err_t page_lunar_upload(const char *content);
+esp_err_t page_history_set_credentials(const char *id, const char *key);
 bool page_history_get(const struct tm *now, page_history_t *history);
 void page_network_refresh(void);
+esp_err_t page_sync_history(struct tm date);
+esp_err_t page_sync_trips(const struct tm *date, bool opened);
 void page_trip_opened(void);
 
 #endif

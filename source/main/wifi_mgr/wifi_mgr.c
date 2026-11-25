@@ -240,9 +240,30 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     }
 }
 
+static unsigned s_leases[WIFI_LEASE_COUNT];
+
+void wifi_mgr_acquire(wifi_lease_reason_t reason)
+{
+    if ((unsigned)reason < WIFI_LEASE_COUNT)
+        __atomic_add_fetch(&s_leases[reason], 1, __ATOMIC_ACQ_REL);
+}
+
+void wifi_mgr_release(wifi_lease_reason_t reason)
+{
+    if ((unsigned)reason < WIFI_LEASE_COUNT)
+        __atomic_sub_fetch(&s_leases[reason], 1, __ATOMIC_ACQ_REL);
+}
+
+bool wifi_mgr_has_leases(void)
+{
+    for (unsigned i = 0; i < WIFI_LEASE_COUNT; ++i)
+        if (__atomic_load_n(&s_leases[i], __ATOMIC_ACQUIRE)) return true;
+    return false;
+}
+
 void wifi_mgr_stop(void)
 {
-    if (!s_running) return;
+    if (!s_running || wifi_mgr_has_leases()) return;
     lock();
     s_running = false;
     __atomic_store_n(&s_internet_confirmed, false, __ATOMIC_RELEASE);
@@ -260,7 +281,7 @@ esp_err_t wifi_mgr_weather_connect(unsigned timeout_ms)
 {
     if (s_sta_up) return ESP_OK;
     if (!s_ssid[0]) return ESP_ERR_INVALID_STATE;
-    xEventGroupClearBits(s_events, GOT_IP_BIT | STA_FAIL_BIT);
+    xEventGroupClearBits(s_events, STA_FAIL_BIT);
     if (!s_running) {
         esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
         if (err == ESP_OK) err = config_sta(s_ssid, s_pass);
@@ -270,7 +291,7 @@ esp_err_t wifi_mgr_weather_connect(unsigned timeout_ms)
         apply_radio();
     }
     const esp_err_t err = esp_wifi_connect();
-    if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) return err;
+    if (err != ESP_OK && err != ESP_ERR_WIFI_STATE && err != ESP_ERR_WIFI_CONN) return err;
     const EventBits_t bits = xEventGroupWaitBits(s_events, GOT_IP_BIT | STA_FAIL_BIT,
         pdFALSE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
     return (bits & GOT_IP_BIT) && s_sta_up ? ESP_OK : ESP_ERR_TIMEOUT;
@@ -279,11 +300,10 @@ esp_err_t wifi_mgr_weather_connect(unsigned timeout_ms)
 esp_err_t wifi_mgr_start(void)
 {
     esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
+    if (err != ESP_OK) {
+        // 保留 NVS 原始内容，配置不可读时仍允许离线启动和临时配网。
+        ESP_LOGE(TAG, "NVS 不可用，保留现有分区：%s", esp_err_to_name(err));
     }
-    ESP_ERROR_CHECK(err);
 
     s_lock = xSemaphoreCreateMutex();
     s_events = xEventGroupCreate();
@@ -312,6 +332,14 @@ esp_err_t wifi_mgr_start(void)
 wifi_mgr_mode_t wifi_mgr_mode(void)
 {
     return s_sta_up ? WIFI_MGR_MODE_STA : WIFI_MGR_MODE_AP;
+}
+
+bool wifi_mgr_has_credentials(void)
+{
+    lock();
+    const bool saved = s_ssid[0] != 0 && !s_save_after_connect;
+    unlock();
+    return saved;
 }
 
 bool wifi_mgr_is_sta_up(void)
@@ -404,14 +432,16 @@ esp_err_t wifi_mgr_scan_json(char *buf, size_t len)
         char ssid[33] = { 0 };
         memcpy(ssid, rec[i].ssid, sizeof(rec[i].ssid));
         for (char *p = ssid; *p; p++) {
-            if (*p == '"' || *p == '\\') {
+            if ((unsigned char)*p < 32 || *p == '"' || *p == '\\') {
                 *p = ' ';
             }
         }
         const char *band = rec[i].primary >= 36 ? "5G" : "2.4G";
-        off += (size_t)snprintf(buf + off, len - off,
-                                "%s{\"ssid\":\"%s\",\"rssi\":%d,\"auth\":%d,\"band\":\"%s\"}",
-                                i ? "," : "", ssid, rec[i].rssi, (int)rec[i].authmode, band);
+        const int written = snprintf(buf + off, len - off,
+            "%s{\"ssid\":\"%s\",\"rssi\":%d,\"auth\":%d,\"band\":\"%s\"}",
+            i ? "," : "", ssid, rec[i].rssi, (int)rec[i].authmode, band);
+        if (written < 0 || (size_t)written + 2 >= len - off) break;
+        off += (size_t)written;
     }
     if (off + 3 < len) {
         memcpy(buf + off, "]}", 3);

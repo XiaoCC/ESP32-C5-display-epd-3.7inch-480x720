@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.c"
+        "net_sync/net_sync.c"
         "board/board.c"
         "pmic/axp2101.c"
         "rtc/pcf8563.c"
@@ -29,6 +30,7 @@ idf_component_register(
         "qrcode"
         "tf_card"
         "wifi_mgr"
+        "net_sync"
         "web_server"
     PRIV_REQUIRES
         json
@@ -55,8 +57,23 @@ idf_component_register(
         "dashboard/lunar_web.gz"
         "dashboard/history_seed.tsv"
         "web_server/www/index.html"
+        "web_server/www/eink_worker.js"
         "web_server/www/weather.js"
         "web_server/www/place_catalog.gz"
         "web_server/www/eink_pipeline.js"
-        "web_server/www/vue.global.prod.js"
 )
+
+
+# 压缩网页资源，保留可直接编辑和审查的文本源码。
+idf_build_get_property(idf_python PYTHON)
+foreach(asset IN ITEMS app.css app.js vue.global.prod.js)
+    set(input "${CMAKE_CURRENT_LIST_DIR}/web_server/www/${asset}")
+    set(output "${CMAKE_CURRENT_BINARY_DIR}/${asset}.gz")
+    add_custom_command(
+        OUTPUT "${output}"
+        COMMAND "${idf_python}" "${CMAKE_CURRENT_LIST_DIR}/web_server/gzip_asset.py" "${input}" "${output}"
+        DEPENDS "${input}" "${CMAKE_CURRENT_LIST_DIR}/web_server/gzip_asset.py"
+        VERBATIM
+    )
+    target_add_binary_data(${COMPONENT_LIB} "${output}" BINARY)
+endforeach()

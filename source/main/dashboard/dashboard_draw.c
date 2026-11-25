@@ -7,6 +7,7 @@
 #include "freertos/semphr.h"
 #include "screen_driver.h"
 #include "tf_card.h"
+#include "wifi_mgr.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -560,7 +561,11 @@ static void weather_layout(void)
     text(252, 24, line, 2, BLUE);
     snprintf(line, sizeof(line), "%s  数据 %02d:%02d", weekdays[w->weekday], w->hour, w->minute);
     text(252, 72, line, 1, GREEN);
-    if (!dashboard_weather_is_live()) text(24, 687, "CACHE", 1, BLUE);
+    if (!dashboard_weather_is_live()) {
+        char cached[32];
+        snprintf(cached, sizeof(cached), "CACHE %02d-%02d", w->month, w->day);
+        text(24, 687, cached, 1, BLUE);
+    }
     const bool is_today = clock_valid && local.tm_year + 1900 == w->year &&
         local.tm_mon + 1 == w->month && local.tm_mday == w->day;
 
@@ -669,6 +674,10 @@ static void trip_layout(void)
         else snprintf(line, sizeof(line), "%s", weather_label(weather.code));
         text(134, 626, line, 1, BLUE);
         text(337, 649, "OPEN-METEO", 1, BLACK);
+        if (!wifi_mgr_is_sta_up()) {
+            snprintf(line, sizeof(line), "CACHE %s", weather.updated);
+            text(28, 674, line, 1, BLUE);
+        }
     } else centered(240, 591, "暂无抵达日预报", 2, BLACK);
 }
 
@@ -713,7 +722,15 @@ static void history_layout(const struct tm *now, int day)
         p = end;
     }
     if (*p) text(32, 610, "...", 1, BLUE);
-    text(30, 650, "来源  中文维基百科", 1, BLUE);
+    text(30, 650, item.domestic_source ? "来源  接口盒子" : "来源  中文维基百科", 1, BLUE);
+    if (!wifi_mgr_is_sta_up() && item.fetched_at) {
+        struct tm fetch_time;
+        const time_t fetched = item.fetched_at;
+        if (localtime_r(&fetched, &fetch_time)) {
+            strftime(line, sizeof(line), "CACHE %Y-%m-%d", &fetch_time);
+            text(30, 676, line, 1, BLUE);
+        }
+    }
 }
 
 static bool ink(const draw_op_t *op, int dx, int dy)

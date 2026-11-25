@@ -22,6 +22,11 @@
 #include "app_display.h"
 #include "dashboard.h"
 #include "page_data.h"
+#include "net_sync.h"
+#include "nvs.h"
+#include "esp_rom_crc.h"
+#include "esp_vfs_fat.h"
+#include "esp_timer.h"
 
 static const char *TAG = "web";
 static TickType_t s_last_activity;
@@ -32,15 +37,20 @@ void web_server_note_activity(void)
     __atomic_store_n(&s_last_activity, xTaskGetTickCount(), __ATOMIC_RELAXED);
 }
 
+bool web_server_request_active(void)
+{
+    return __atomic_load_n(&s_user_request_active, __ATOMIC_ACQUIRE);
+}
+
 uint32_t web_server_idle_ms(void)
 {
-    if (__atomic_load_n(&s_user_request_active, __ATOMIC_ACQUIRE)) return 0;
+    if (web_server_request_active()) return 0;
     return pdTICKS_TO_MS(xTaskGetTickCount() -
         __atomic_load_n(&s_last_activity, __ATOMIC_RELAXED));
 }
 
 typedef enum { JOB_IDLE, JOB_REFRESH, JOB_RECEIVING, JOB_ERROR } job_phase_t;
-typedef enum { JOB_FRAME, JOB_CLEAR_SCREEN, JOB_ALBUM_SHOW } job_kind_t;
+typedef enum { JOB_FRAME, JOB_CLEAR_SCREEN, JOB_ALBUM_SHOW, JOB_CALIBRATE } job_kind_t;
 #define FRAME_FORMAT "otp6-v1"
 #define FRAME_CHUNK_BYTES 2048
 
@@ -48,6 +58,7 @@ static portMUX_TYPE s_job_lock = portMUX_INITIALIZER_UNLOCKED;
 static volatile job_phase_t s_job_phase = JOB_IDLE;
 static esp_err_t s_job_err = ESP_OK;
 static TaskHandle_t s_job_task;
+static int s_calibration_ink;
 static uint32_t s_job_id;
 static job_kind_t s_job_kind;
 static screen_upload_report_t s_upload_report;
@@ -168,8 +179,8 @@ extern const uint8_t index_html_start[]        asm("_binary_index_html_start");
 extern const uint8_t index_html_end[]          asm("_binary_index_html_end");
 extern const uint8_t pipeline_js_start[]       asm("_binary_eink_pipeline_js_start");
 extern const uint8_t pipeline_js_end[]         asm("_binary_eink_pipeline_js_end");
-extern const uint8_t vue_js_start[]            asm("_binary_vue_global_prod_js_start");
-extern const uint8_t vue_js_end[]              asm("_binary_vue_global_prod_js_end");
+extern const uint8_t vue_js_start[]            asm("_binary_vue_global_prod_js_gz_start");
+extern const uint8_t vue_js_end[]              asm("_binary_vue_global_prod_js_gz_end");
 
 static esp_err_t send_embedded(httpd_req_t *req, const uint8_t *start, const uint8_t *end,
                                const char *type, const char *cache)
@@ -376,6 +387,22 @@ static esp_err_t lunar_script(httpd_req_t *req)
     return httpd_resp_send(req, lunar_script_start, lunar_script_end - lunar_script_start);
 }
 
+static esp_err_t history_provider_post(httpd_req_t *req)
+{
+    char body[128];
+    if (read_json_body(req, body, sizeof(body)) != ESP_OK)
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "历史数据源设置无效");
+    cJSON *json = cJSON_ParseWithOpts(body, NULL, true);
+    const cJSON *id = cJSON_GetObjectItemCaseSensitive(json, "id");
+    const cJSON *key = cJSON_GetObjectItemCaseSensitive(json, "key");
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    if (cJSON_IsString(id) && cJSON_IsString(key))
+        err = page_history_set_credentials(id->valuestring, key->valuestring);
+    cJSON_Delete(json);
+    if (err != ESP_OK) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ID 或密钥无效，或保存失败");
+    return send_json(req, "{\"ok\":true}");
+}
+
 static esp_err_t history_get(httpd_req_t *req)
 {
     struct tm day;
@@ -558,8 +585,122 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 
 static esp_err_t vue_get_handler(httpd_req_t *req)
 {
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
     return send_embedded(req, vue_js_start, vue_js_end,
                          "application/javascript; charset=utf-8", "public, max-age=86400");
+}
+
+extern const uint8_t app_css_start[] asm("_binary_app_css_gz_start");
+extern const uint8_t app_css_end[] asm("_binary_app_css_gz_end");
+extern const uint8_t app_js_start[] asm("_binary_app_js_gz_start");
+extern const uint8_t app_js_end[] asm("_binary_app_js_gz_end");
+extern const uint8_t worker_js_start[] asm("_binary_eink_worker_js_start");
+extern const uint8_t worker_js_end[] asm("_binary_eink_worker_js_end");
+
+static esp_err_t app_css_get(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    return send_embedded(req, app_css_start, app_css_end, "text/css; charset=utf-8", "no-cache");
+}
+
+static esp_err_t app_js_get(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    return send_embedded(req, app_js_start, app_js_end, "application/javascript; charset=utf-8", "no-cache");
+}
+
+static esp_err_t worker_js_get(httpd_req_t *req)
+{
+    return send_embedded(req, worker_js_start, worker_js_end, "application/javascript; charset=utf-8", "no-cache");
+}
+
+static esp_err_t sync_handler(httpd_req_t *req)
+{
+    if (req->method == HTTP_POST) {
+        char body[96];
+        if (read_json_body(req, body, sizeof(body)) != ESP_OK) return ESP_FAIL;
+        cJSON *json = cJSON_Parse(body);
+        const cJSON *start = cJSON_GetObjectItemCaseSensitive(json, "start");
+        const cJSON *end = cJSON_GetObjectItemCaseSensitive(json, "end");
+        esp_err_t err = ESP_ERR_INVALID_ARG;
+        if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "now"))) {
+            net_sync_request(NET_SYNC_ALL | NET_SYNC_MANUAL);
+            err = ESP_OK;
+        } else if (cJSON_IsNumber(start) && cJSON_IsNumber(end) &&
+                start->valueint == start->valuedouble && end->valueint == end->valuedouble) {
+            err = net_sync_set_window(start->valueint, end->valueint);
+        }
+        cJSON_Delete(json);
+        if (err != ESP_OK) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "同步设置无效或保存失败");
+        return send_json(req, "{\"ok\":true}");
+    }
+    char *json = malloc(2400);
+    if (!json) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "内存不足");
+    const int length = net_sync_status(json, 2400);
+    const esp_err_t err = length < 0 ? ESP_FAIL : send_json(req, json);
+    free(json);
+    return err;
+}
+
+static esp_err_t palette_handler(httpd_req_t *req)
+{
+    nvs_handle_t settings;
+    char colors[64];
+    if (req->method == HTTP_GET) {
+        char record[192];
+        if (page_sd_read("PALETTE.JSN", record, sizeof(record)) == ESP_OK) {
+            cJSON *json = cJSON_ParseWithOpts(record, NULL, true);
+            const cJSON *version = cJSON_GetObjectItemCaseSensitive(json, "schema_version");
+            const cJSON *saved = cJSON_GetObjectItemCaseSensitive(json, "colors");
+            const cJSON *crc = cJSON_GetObjectItemCaseSensitive(json, "crc");
+            const bool ok = cJSON_IsNumber(version) && version->valuedouble == 1 &&
+                cJSON_IsString(saved) && strlen(saved->valuestring) < sizeof(colors) && cJSON_IsNumber(crc) &&
+                crc->valuedouble == esp_rom_crc32_le(0, (const uint8_t *)saved->valuestring, strlen(saved->valuestring));
+            if (ok) strcpy(colors, saved->valuestring);
+            cJSON_Delete(json);
+            if (ok) return send_json(req, colors);
+        }
+        if (nvs_open("display", NVS_READONLY, &settings) != ESP_OK) return send_json(req, "null");
+        size_t size = sizeof(colors);
+        const esp_err_t err = nvs_get_str(settings, "palette_v1", colors, &size);
+        nvs_close(settings);
+        return send_json(req, err == ESP_OK ? colors : "null");
+    }
+    if (read_json_body(req, colors, sizeof(colors)) != ESP_OK) return ESP_FAIL;
+    cJSON *values = cJSON_Parse(colors);
+    bool valid = cJSON_IsArray(values) && cJSON_GetArraySize(values) == 6;
+    cJSON *color;
+    cJSON_ArrayForEach(color, values) {
+        if (!cJSON_IsString(color) || color->valuestring[0] != '#' ||
+                strlen(color->valuestring) != 7 ||
+                strspn(color->valuestring + 1, "0123456789abcdefABCDEF") != 6) valid = false;
+    }
+    if (valid && tf_card_is_mounted()) {
+        char *compact = cJSON_PrintUnformatted(values);
+        cJSON *file = cJSON_CreateObject();
+        const bool complete = compact && file && cJSON_AddNumberToObject(file, "schema_version", 1) &&
+            cJSON_AddStringToObject(file, "colors", compact) && cJSON_AddNumberToObject(file, "crc",
+                esp_rom_crc32_le(0, (const uint8_t *)compact, strlen(compact)));
+        char *body = complete ? cJSON_PrintUnformatted(file) : NULL;
+        const esp_err_t saved = body ? page_sd_write("PALETTE.JSN", body) : ESP_ERR_NO_MEM;
+        free(body);
+        free(compact);
+        cJSON_Delete(file);
+        if (saved != ESP_OK) {
+            cJSON_Delete(values);
+            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SD 色板保存失败");
+        }
+    }
+    cJSON_Delete(values);
+    if (!valid) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "色板必须包含六个 RGB 值");
+    esp_err_t err = nvs_open("display", NVS_READWRITE, &settings);
+    if (err == ESP_OK) {
+        err = nvs_set_str(settings, "palette_v1", colors);
+        if (err == ESP_OK) err = nvs_commit(settings);
+        nvs_close(settings);
+    }
+    if (err != ESP_OK) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "色板保存失败");
+    return send_json(req, "{\"ok\":true}");
 }
 
 static esp_err_t pipeline_get_handler(httpd_req_t *req)
@@ -598,7 +739,16 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     char ssid[33] = { 0 };
     char escaped_ssid[193];
     char url[48] = { 0 };
-    char json[960];
+    char json[1024];
+    static int sd_free_mib = -1;
+    static int64_t sd_checked;
+    const int64_t now = esp_timer_get_time();
+    if (tf_card_is_mounted() && (!sd_checked || now - sd_checked >= 60 * 1000000LL)) {
+        uint64_t total, free_bytes;
+        sd_free_mib = esp_vfs_fat_info(TF_CARD_MOUNT_POINT, &total, &free_bytes) == ESP_OK ?
+            (int)(free_bytes / (1024 * 1024)) : -1;
+        sd_checked = now;
+    }
     wifi_mgr_get_ip(ip, sizeof(ip));
     wifi_mgr_get_ssid(ssid, sizeof(ssid));
     wifi_mgr_service_url(url, sizeof(url));
@@ -617,11 +767,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     static const char *const screens[] = {"text", "photo", "calendar", "weather", "quote", "todo", "trip", "history", "network"};
     const screen_mode_t current = screen_rotation_current_mode();
     int tail = snprintf(json + used, sizeof(json) - used,
-        ",\"job\":\"%s\",\"job_id\":%u,\"rotation\":%u,\"rotation_epoch\":%u,\"rotation_busy\":%s,\"active_screen\":\"%s\",\"clock\":\"%s\",\"weather_data\":\"%s\",\"weather_source\":\"%s\",\"available_screens\":%u}",
+        ",\"job\":\"%s\",\"job_id\":%u,\"rotation\":%u,\"rotation_epoch\":%u,\"rotation_busy\":%s,\"active_screen\":\"%s\",\"clock\":\"%s\",\"weather_data\":\"%s\",\"weather_source\":\"%s\",\"available_screens\":%u,\"sd_free_mib\":%d,\"refresh_count\":%lu}",
         job_phase_name(s_job_phase), (unsigned)s_job_id, screen_rotation_get(), (unsigned)screen_rotation_epoch(), screen_rotation_busy() ? "true" : "false",
         screens[current], clock, dashboard_weather_ready() ? "ready" : "pending",
         dashboard_weather_ready() ? (dashboard_weather_is_live() ? "live" : "cache") : "none",
-        (unsigned)screen_rotation_available_modes());
+        (unsigned)screen_rotation_available_modes(), sd_free_mib, (unsigned long)screen_driver_refresh_count());
     if (tail < 0 || (size_t)tail >= sizeof(json) - used) return ESP_FAIL;
     return send_json(req, json);
 }
@@ -854,6 +1004,12 @@ static void frame_job_task(void *arg)
             if (complete != ESP_OK) ESP_LOGW(TAG, "async complete: %s", esp_err_to_name(complete));
         } else if (kind == JOB_ALBUM_SHOW) {
             err = screen_album_show(s_photo_pending);
+            report.completed = err == ESP_OK;
+            report.display_generation = screen_driver_generation();
+            finish_job(err, &report);
+        } else if (kind == JOB_CALIBRATE) {
+            err = s_calibration_ink < 0 ? screen_rotation_redraw_current() :
+                screen_driver_fill((screen_color_t)s_calibration_ink);
             report.completed = err == ESP_OK;
             report.display_generation = screen_driver_generation();
             finish_job(err, &report);
@@ -1157,6 +1313,29 @@ static esp_err_t clear_post_handler(httpd_req_t *req)
     return send_job_json(req);
 }
 
+static esp_err_t calibration_post(httpd_req_t *req)
+{
+    char query[24], value[12];
+    if (req->content_len || httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+            httpd_query_key_value(query, "ink", value, sizeof(value)) != ESP_OK)
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "缺少校准色号");
+    const bool restore = strcmp(value, "restore") == 0;
+    if (!restore && (strlen(value) != 1 || !strchr("012356", value[0])))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "校准色号无效");
+    if (!begin_job(JOB_CALIBRATE)) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return send_json(req, "{\"ok\":false,\"message\":\"屏幕忙，请稍后再试\"}");
+    }
+    s_calibration_ink = restore ? -1 : value[0] - '0';
+    portENTER_CRITICAL(&s_job_lock);
+    s_job_phase = JOB_REFRESH;
+    s_job_step = "calibrate";
+    portEXIT_CRITICAL(&s_job_lock);
+    xTaskNotifyGive(s_job_task);
+    httpd_resp_set_status(req, "202 Accepted");
+    return send_job_json(req);
+}
+
 static esp_err_t management_request(httpd_req_t *req)
 {
     const httpd_uri_t *route = req->user_ctx;
@@ -1164,14 +1343,17 @@ static esp_err_t management_request(httpd_req_t *req)
         httpd_resp_set_status(req, "503 Service Unavailable");
         return send_json(req, "{\"ok\":false}");
     }
-    const bool user_activity = strcmp(route->uri, "/api/status") && strcmp(route->uri, "/api/job");
+    const bool user_activity = strcmp(route->uri, "/api/status") && strcmp(route->uri, "/api/job") &&
+        (req->method != HTTP_GET || strcmp(route->uri, "/api/sync"));
     if (user_activity) {
+        wifi_mgr_acquire(WIFI_LEASE_WEB);
         __atomic_store_n(&s_user_request_active, true, __ATOMIC_RELEASE);
         web_server_note_activity();
     }
     const esp_err_t err = route->handler(req);
     if (user_activity) {
         web_server_note_activity();
+        wifi_mgr_release(WIFI_LEASE_WEB);
         __atomic_store_n(&s_user_request_active, false, __ATOMIC_RELEASE);
     }
     return err;
@@ -1181,7 +1363,7 @@ esp_err_t web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 43;
+    config.max_uri_handlers = 56;
     config.stack_size = 12288;
     config.max_open_sockets = 7;
     config.recv_wait_timeout = 5;
@@ -1202,6 +1384,15 @@ esp_err_t web_server_start(void)
     static const httpd_uri_t handlers[] = {
         { .uri = "/", .method = HTTP_GET, .handler = root_get_handler },
         { .uri = "/vue.global.prod.js", .method = HTTP_GET, .handler = vue_get_handler },
+        { .uri = "/app.css", .method = HTTP_GET, .handler = app_css_get },
+        { .uri = "/app.js", .method = HTTP_GET, .handler = app_js_get },
+        { .uri = "/eink_worker.js", .method = HTTP_GET, .handler = worker_js_get },
+        { .uri = "/api/sync", .method = HTTP_GET, .handler = sync_handler },
+        { .uri = "/api/sync", .method = HTTP_POST, .handler = sync_handler },
+        { .uri = "/api/palette", .method = HTTP_GET, .handler = palette_handler },
+        { .uri = "/api/palette", .method = HTTP_POST, .handler = palette_handler },
+        { .uri = "/api/photo/palette", .method = HTTP_GET, .handler = palette_handler },
+        { .uri = "/api/photo/palette", .method = HTTP_POST, .handler = palette_handler },
         { .uri = "/eink_pipeline.js", .method = HTTP_GET, .handler = pipeline_get_handler },
         { .uri = "/weather.js", .method = HTTP_GET, .handler = weather_script_get },
         { .uri = "/api/weather/location", .method = HTTP_GET, .handler = weather_settings_get },
@@ -1217,6 +1408,7 @@ esp_err_t web_server_start(void)
         { .uri = "/api/trips/select", .method = HTTP_POST, .handler = trip_select_post },
         { .uri = "/place-catalog.json", .method = HTTP_GET, .handler = place_catalog_get },
         { .uri = "/api/history", .method = HTTP_GET, .handler = history_get },
+        { .uri = "/api/history/provider", .method = HTTP_POST, .handler = history_provider_post },
         { .uri = "/api/lunar", .method = HTTP_POST, .handler = lunar_post },
         { .uri = "/lunar.js", .method = HTTP_GET, .handler = lunar_script },
         { .uri = "/api/display/shortcut", .method = HTTP_GET, .handler = shortcut_handler },
@@ -1241,6 +1433,7 @@ esp_err_t web_server_start(void)
         { .uri = "/api/frame", .method = HTTP_POST, .handler = frame_post_handler },
         { .uri = "/api/job", .method = HTTP_GET, .handler = job_get_handler },
         { .uri = "/api/panel", .method = HTTP_GET, .handler = panel_get_handler },
+        { .uri = "/api/calibrate/patch", .method = HTTP_POST, .handler = calibration_post },
         { .uri = "/api/clear", .method = HTTP_POST, .handler = clear_post_handler },
     };
     for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); i++) {

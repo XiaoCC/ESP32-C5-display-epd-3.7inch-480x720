@@ -1,4 +1,5 @@
 #include "page_data.h"
+#include "net_sync.h"
 #include "app_display.h"
 #include "tf_card.h"
 #include "wifi_mgr.h"
@@ -7,6 +8,8 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_rom_crc.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -21,7 +24,6 @@
 static const char *TAG = "page_data";
 static SemaphoreHandle_t s_files;
 static SemaphoreHandle_t s_trips_lock;
-static TaskHandle_t s_sync_task;
 static unsigned s_shortcut = SCREEN_MODE_TODO;
 extern const char lunar_2026[] asm("_binary_L2026_TSV_start");
 extern const char lunar_2026_end[] asm("_binary_L2026_TSV_end");
@@ -382,6 +384,14 @@ static void history_file(const struct tm *date, char *name, size_t capacity)
     strftime(name, capacity, "H%m%d.JSN", date);
 }
 
+static uint32_t history_crc(int year, const char *text, const char *date, uint32_t fetched)
+{
+    char header[64];
+    const int size = snprintf(header, sizeof(header), "1|%d|%s|%lu|", year, date, (unsigned long)fetched);
+    const uint32_t crc = esp_rom_crc32_le(0, (const uint8_t *)header, size);
+    return esp_rom_crc32_le(crc, (const uint8_t *)text, strlen(text));
+}
+
 bool page_history_get(const struct tm *now, page_history_t *history)
 {
     char name[16], body[768];
@@ -389,76 +399,40 @@ bool page_history_get(const struct tm *now, page_history_t *history)
     if (page_sd_read(name, body, sizeof(body)) != ESP_OK) return false;
     cJSON *json = cJSON_Parse(body);
     const cJSON *year = cJSON_GetObjectItemCaseSensitive(json, "year");
-    const bool ok = cJSON_IsNumber(year) && year->valueint >= -5000 && year->valueint <= now->tm_year + 1900 &&
+    bool ok = cJSON_IsNumber(year) && year->valueint >= -5000 && year->valueint <= now->tm_year + 1900 &&
         copy_field(json, "text", history->text, sizeof(history->text), true);
     if (ok) {
         history->year = year->valueint;
+        history->fetched_at = 0;
+        const cJSON *source = cJSON_GetObjectItemCaseSensitive(json, "source");
+        history->domestic_source = cJSON_IsString(source) && !strcmp(source->valuestring, "apihz");
         strftime(history->date, sizeof(history->date), "%Y-%m-%d", now);
+        const cJSON *schema = cJSON_GetObjectItemCaseSensitive(json, "schema_version");
+        const cJSON *fetched = cJSON_GetObjectItemCaseSensitive(json, "fetched_at");
+        const cJSON *valid = cJSON_GetObjectItemCaseSensitive(json, "valid_for_date");
+        const cJSON *crc = cJSON_GetObjectItemCaseSensitive(json, "crc");
+        if (schema || fetched || valid || crc) {
+            ok = cJSON_IsNumber(schema) && schema->valuedouble == 1 &&
+                cJSON_IsString(valid) && !strcmp(valid->valuestring, history->date) &&
+                cJSON_IsNumber(fetched) && fetched->valuedouble > 0 && fetched->valuedouble <= UINT32_MAX &&
+                cJSON_IsNumber(crc) && crc->valuedouble ==
+                    history_crc(history->year, history->text, history->date, (uint32_t)fetched->valuedouble);
+            if (ok) history->fetched_at = (uint32_t)fetched->valuedouble;
+        }
     }
     cJSON_Delete(json);
     return ok;
 }
 
-typedef struct {
-    int depth;
-    unsigned size;
-    bool quoted, escaped, number;
-    char key[12], token[896];
-    char text[273];
-    int year;
-    bool has_year;
-} history_parser_t;
-
-static bool history_byte(history_parser_t *p, char c)
+/* 国内接口的日期字段可能是数字，也可能是十进制字符串。 */
+static int history_number(const cJSON *value)
 {
-    if (p->quoted) {
-        if (!p->escaped && c == '"') {
-            p->quoted = false;
-            if (p->depth == 2) {
-                p->token[p->size] = 0;
-                if (!strcmp(p->key, "text") && !p->text[0] && p->size < sizeof(p->token) - 2) {
-                    char quoted[sizeof(p->token) + 2];
-                    snprintf(quoted, sizeof(quoted), "\"%s\"", p->token);
-                    cJSON *value = cJSON_Parse(quoted);
-                    if (cJSON_IsString(value)) {
-                        const size_t len = strlen(value->valuestring);
-                        if (len && len < sizeof(p->text) && !strpbrk(value->valuestring, "\r\n\t"))
-                            strcpy(p->text, value->valuestring);
-                    }
-                    cJSON_Delete(value);
-                    p->key[0] = 0;
-                } else if (!strcmp(p->token, "text") || !strcmp(p->token, "year")) {
-                    strcpy(p->key, p->token);
-                } else p->key[0] = 0;
-            }
-        } else {
-            if (p->depth == 2 && p->size < sizeof(p->token) - 1) p->token[p->size++] = c;
-            p->escaped = !p->escaped && c == '\\';
-        }
-        return false;
-    }
-    if (p->depth == 2 && !strcmp(p->key, "year")) {
-        if ((c >= '0' && c <= '9') || c == '-') {
-            if (!p->number) p->size = 0;
-            p->number = true;
-            if (p->size < 6) p->token[p->size++] = c;
-            return false;
-        }
-        if (p->number) {
-            p->token[p->size] = 0;
-            p->year = atoi(p->token);
-            p->has_year = true;
-            p->number = false;
-            p->key[0] = 0;
-        }
-    }
-    if (c == '"') { p->quoted = true; p->escaped = false; p->size = 0; }
-    else if (c == '{') { ++p->depth; if (p->depth == 2) { p->key[0] = 0; p->text[0] = 0; p->has_year = false; } }
-    else if (c == '}') {
-        if (p->depth == 2 && p->has_year && p->text[0]) return true;
-        --p->depth;
-    } else if (c == ',' && p->depth == 2) p->key[0] = 0;
-    return false;
+    if (cJSON_IsNumber(value) && value->valuedouble == value->valueint) return value->valueint;
+    if (!cJSON_IsString(value) || !value->valuestring[0]) return 0;
+    const char *start = value->valuestring;
+    char *end;
+    const long n = strtol(start, &end, 10);
+    return end != start && !*end && n >= -5000 && n <= 9999 ? (int)n : 0;
 }
 
 static esp_http_client_handle_t open_url(const char *url)
@@ -478,27 +452,81 @@ static esp_http_client_handle_t open_url(const char *url)
     return client;
 }
 
+typedef struct {
+    char id[21];
+    char key[65];
+} history_credentials_t;
+
+esp_err_t page_history_set_credentials(const char *id, const char *key)
+{
+    if (!id || !key || strlen(id) >= 21 || strlen(key) >= 65 ||
+            (!!*id != !!*key) || strspn(id, "0123456789") != strlen(id) ||
+            strspn(key, "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_") != strlen(key))
+        return ESP_ERR_INVALID_ARG;
+    history_credentials_t credentials = {0};
+    strcpy(credentials.id, id);
+    strcpy(credentials.key, key);
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("history", NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_blob(handle, "apihz_v1", &credentials, sizeof(credentials));
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err == ESP_OK) net_sync_request(NET_SYNC_HISTORY | NET_SYNC_MANUAL);
+    return err;
+}
+
 static bool fetch_history(const struct tm *date)
 {
-    char url[112], name[16];
-    strftime(url, sizeof(url), "https://zh.wikipedia.org/api/rest_v1/feed/onthisday/events/%m/%d", date);
+    char url[176], name[16], response[1536];
+    history_credentials_t credentials = {0};
+    nvs_handle_t handle;
+    if (nvs_open("history", NVS_READONLY, &handle) == ESP_OK) {
+        size_t size = sizeof(credentials);
+        if (nvs_get_blob(handle, "apihz_v1", &credentials, &size) != ESP_OK ||
+                size != sizeof(credentials)) memset(&credentials, 0, sizeof(credentials));
+        nvs_close(handle);
+    }
+    credentials.id[sizeof(credentials.id) - 1] = 0;
+    credentials.key[sizeof(credentials.key) - 1] = 0;
+    snprintf(url, sizeof(url), "https://cn.apihz.cn/api/zici/today.php?id=%s&key=%s&m=%d&d=%d",
+        credentials.id[0] && credentials.key[0] ? credentials.id : "88888888",
+        credentials.id[0] && credentials.key[0] ? credentials.key : "88888888",
+        date->tm_mon + 1, date->tm_mday);
     esp_http_client_handle_t client = open_url(url);
     if (!client) return false;
-    char buffer[768];
-    history_parser_t parser = {0};
-    bool found = false;
-    const int64_t deadline = esp_timer_get_time() + 3500000;
-    while (!found && wifi_mgr_is_sta_up() && esp_timer_get_time() < deadline) {
-        const int n = esp_http_client_read(client, buffer, sizeof(buffer));
-        if (n <= 0) break;
-        for (int i = 0; i < n && !found; ++i) found = history_byte(&parser, buffer[i]);
-    }
+    const int received = esp_http_client_read_response(client, response, sizeof(response) - 1);
     esp_http_client_cleanup(client);
-    if (!found || parser.year < -5000 || parser.year > date->tm_year + 1900) return false;
+    if (received <= 0 || received >= sizeof(response) - 1) return false;
+    response[received] = 0;
+    cJSON *result = cJSON_ParseWithOpts(response, NULL, true);
+    const int year = history_number(cJSON_GetObjectItemCaseSensitive(result, "y"));
+    char title[273];
+    const bool found = history_number(cJSON_GetObjectItemCaseSensitive(result, "code")) == 200 &&
+        history_number(cJSON_GetObjectItemCaseSensitive(result, "m")) == date->tm_mon + 1 &&
+        history_number(cJSON_GetObjectItemCaseSensitive(result, "d")) == date->tm_mday &&
+        year != 0 && year >= -5000 && year <= date->tm_year + 1900 &&
+        copy_field(result, "title", title, sizeof(title), true);
+    cJSON_Delete(result);
+    if (!found) {
+        ESP_LOGW(TAG, "国内历史接口未返回有效事件 %02d-%02d", date->tm_mon + 1, date->tm_mday);
+        return false;
+    }
     cJSON *json = cJSON_CreateObject();
     if (!json) return false;
-    cJSON_AddNumberToObject(json, "year", parser.year);
-    cJSON_AddStringToObject(json, "text", parser.text);
+    char valid_for[11];
+    strftime(valid_for, sizeof(valid_for), "%Y-%m-%d", date);
+    const uint32_t fetched = (uint32_t)time(NULL);
+    if (!cJSON_AddNumberToObject(json, "year", year) ||
+            !cJSON_AddStringToObject(json, "text", title) ||
+            !cJSON_AddStringToObject(json, "source", "apihz") ||
+            !cJSON_AddNumberToObject(json, "schema_version", 1) ||
+            !cJSON_AddStringToObject(json, "valid_for_date", valid_for) ||
+            !cJSON_AddNumberToObject(json, "fetched_at", fetched) ||
+            !cJSON_AddNumberToObject(json, "crc", history_crc(year, title, valid_for, fetched))) {
+        cJSON_Delete(json);
+        return false;
+    }
     char *body = cJSON_PrintUnformatted(json);
     history_file(date, name, sizeof(name));
     const bool saved = body && page_sd_write(name, body) == ESP_OK;
@@ -521,15 +549,25 @@ static void trip_weather_file(const char *key, char *name, size_t capacity)
 
 static bool read_trip_weather(const page_trip_t *trip, page_trip_weather_t *weather, char *saved_date)
 {
-    char body[144], key[64], name[16];
+    char body[192], key[64], name[16];
     trip_weather_key(trip, key, sizeof(key));
     trip_weather_file(key, name, sizeof(name));
     if (page_sd_read(name, body, sizeof(body)) != ESP_OK) return false;
+    char *metadata = strchr(body, '|');
+    if (metadata) {
+        unsigned long fetched, crc;
+        int end = 0;
+        *metadata++ = 0;
+        if (sscanf(metadata, "1 %lu %lx%n", &fetched, &crc, &end) != 2 || metadata[end] ||
+                fetched == 0 || crc != esp_rom_crc32_le(0, (const uint8_t *)body, strlen(body))) return false;
+    }
     char *cursor = strchr(body, '\t');
     if (!cursor) return false;
     *cursor++ = 0;
-    return !strcmp(body, key) && sscanf(cursor, "%10s %d %d %d %d", saved_date,
-        &weather->high, &weather->low, &weather->rain, &weather->code) == 5;
+    int end = 0;
+    return !strcmp(body, key) && sscanf(cursor, "%10s %d %d %d %d%n", saved_date,
+        &weather->high, &weather->low, &weather->rain, &weather->code, &end) == 5 &&
+        !cursor[end] && format_date(saved_date);
 }
 
 bool page_trip_weather(const page_trip_t *trip, page_trip_weather_t *weather)
@@ -563,22 +601,23 @@ char *page_trips_with_status(const char *body)
     return status;
 }
 
-static bool fetch_trip_weather(const page_trip_t *trip, const char *today, bool refresh)
+static esp_err_t fetch_trip_weather(const page_trip_t *trip, const char *today, bool refresh, bool *changed)
 {
     page_trip_weather_t cached;
     char saved[11];
     const bool has_cache = read_trip_weather(trip, &cached, saved);
-    if (!refresh && has_cache && !strcmp(saved, today)) return false;
+    *changed = false;
+    if (!refresh && has_cache && !strcmp(saved, today)) return ESP_OK;
     char url[320];
     snprintf(url, sizeof(url), "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
         "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code"
         "&timezone=auto&start_date=%s&end_date=%s", trip->latitude, trip->longitude, trip->arrival_date, trip->arrival_date);
     esp_http_client_handle_t client = open_url(url);
-    if (!client) return false;
+    if (!client) return ESP_FAIL;
     char response[1536];
     const int n = esp_http_client_read_response(client, response, sizeof(response) - 1);
     esp_http_client_cleanup(client);
-    if (n <= 0 || n >= sizeof(response) - 1) return false;
+    if (n <= 0 || n >= sizeof(response) - 1) return ESP_ERR_INVALID_SIZE;
     response[n] = 0;
     cJSON *json = cJSON_Parse(response);
     const cJSON *daily = cJSON_GetObjectItemCaseSensitive(json, "daily");
@@ -592,36 +631,46 @@ static bool fetch_trip_weather(const page_trip_t *trip, const char *today, bool 
     if (!cJSON_IsArray(dates) || !date) {
         ESP_LOGW(TAG, "Forecast response missing arrival date %s", trip->arrival_date);
         cJSON_Delete(json);
-        return false;
+        return ESP_ERR_NOT_FOUND;
     }
     const cJSON *high = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(daily, "temperature_2m_max"), day_index);
     const cJSON *low = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(daily, "temperature_2m_min"), day_index);
     const cJSON *rain = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(daily, "precipitation_probability_max"), day_index);
     const cJSON *code = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(daily, "weather_code"), day_index);
-    bool changed = false;
+    esp_err_t result = ESP_ERR_INVALID_RESPONSE;
     if (cJSON_IsNumber(high) && cJSON_IsNumber(low) && cJSON_IsNumber(code)) {
-        char key[64], body[144], name[16];
+        char key[64], body[192], name[16];
         trip_weather_key(trip, key, sizeof(key));
         trip_weather_file(key, name, sizeof(name));
         const int rain_chance = cJSON_IsNumber(rain) ? rain->valueint : -1;
         snprintf(body, sizeof(body), "%s\t%s %d %d %d %d", key, today,
             high->valueint, low->valueint, rain_chance, code->valueint);
-        if (page_sd_write(name, body) == ESP_OK) {
-            changed = !has_cache || cached.high != high->valueint || cached.low != low->valueint ||
+        const size_t payload_size = strlen(body);
+        const uint32_t crc = esp_rom_crc32_le(0, (const uint8_t *)body, payload_size);
+        snprintf(body + payload_size, sizeof(body) - payload_size, "|1 %lu %08lx",
+            (unsigned long)time(NULL), (unsigned long)crc);
+        result = page_sd_write(name, body);
+        if (result == ESP_OK) {
+            *changed = !has_cache || cached.high != high->valueint || cached.low != low->valueint ||
                 cached.rain != rain_chance || cached.code != code->valueint;
             ESP_LOGI(TAG, "Saved destination forecast for %s", trip->arrival_date);
         }
     }
     cJSON_Delete(json);
-    return changed;
+    return result;
 }
 
-static void fetch_trips(const struct tm *now, const char *today)
+static esp_err_t fetch_trips(const struct tm *now, const char *today)
 {
     char *body = malloc(TRIPS_BYTES);
-    if (!body) return;
-    cJSON *json = page_sd_read("TRIPS.JSN", body, TRIPS_BYTES) == ESP_OK ? cJSON_Parse(body) : NULL;
+    if (!body) return ESP_ERR_NO_MEM;
+    const esp_err_t read = page_sd_read("TRIPS.JSN", body, TRIPS_BYTES);
+    cJSON *json = read == ESP_OK ? cJSON_Parse(body) : NULL;
     free(body);
+    if (read == ESP_ERR_NOT_FOUND) return ESP_OK;
+    if (read != ESP_OK) return read;
+    if (!cJSON_IsArray(json)) { cJSON_Delete(json); return ESP_ERR_INVALID_RESPONSE; }
+    esp_err_t result = ESP_OK;
     struct tm final_day = *now;
     final_day.tm_mday += 7;
     mktime(&final_day);
@@ -634,10 +683,17 @@ static void fetch_trips(const struct tm *now, const char *today)
     bool visible_forecast_changed = false;
     const int64_t deadline = esp_timer_get_time() + 25000000;
     cJSON_ArrayForEach(item, json) {
-        if (!wifi_mgr_is_sta_up() || esp_timer_get_time() >= deadline) break;
+        if (!wifi_mgr_is_sta_up() || esp_timer_get_time() >= deadline || net_sync_expired()) {
+            result = ESP_ERR_TIMEOUT;
+            break;
+        }
         page_trip_t trip;
         if (parse_trip(item, &trip) && strcmp(trip.arrival_date, today) >= 0 &&
-                strcmp(trip.arrival_date, end) <= 0 && fetch_trip_weather(&trip, today, false)) {
+                strcmp(trip.arrival_date, end) <= 0) {
+            bool changed;
+            const esp_err_t err = fetch_trip_weather(&trip, today, false, &changed);
+            if (err != ESP_OK) result = err;
+            if (!changed) continue;
             char key[64];
             trip_weather_key(&trip, key, sizeof(key));
             visible_forecast_changed |= !strcmp(key, featured_key);
@@ -645,54 +701,50 @@ static void fetch_trips(const struct tm *now, const char *today)
     }
     cJSON_Delete(json);
     if (visible_forecast_changed) app_display_trip_data_changed();
-}
-
-enum {
-    PAGE_SYNC_NETWORK = 1u << 0,
-    PAGE_SYNC_TRIP_OPEN = 1u << 1,
-};
-
-static void sync_task(void *arg)
-{
-    (void)arg;
-    for (;;) {
-        uint32_t requests;
-        xTaskNotifyWait(0, UINT32_MAX, &requests, portMAX_DELAY);
-        struct tm date;
-        if (!wifi_mgr_is_sta_up() || !tf_card_is_mounted() || !dashboard_local_time(&date)) continue;
-        char day[11], previous[11];
-        strftime(day, sizeof(day), "%Y-%m-%d", &date);
-        if (!dashboard_weather_offline()) {
-            page_trip_t trip;
-            if ((requests & PAGE_SYNC_TRIP_OPEN) && page_trip_get(&date, &trip) &&
-                    !strcmp(trip.arrival_date, day) && fetch_trip_weather(&trip, day, true)) {
-                app_display_trip_data_changed();
-            }
-            if (requests & PAGE_SYNC_NETWORK) fetch_trips(&date, day);
-        }
-        if (!(requests & PAGE_SYNC_NETWORK)) continue;
-        if (page_sd_read("HUPDATE.DAT", previous, sizeof(previous)) == ESP_OK && !strcmp(day, previous)) continue;
-        if (page_sd_write("HUPDATE.DAT", day) != ESP_OK) continue;
-        unsigned stored = 0;
-        for (int i = 0; i < 7 && wifi_mgr_is_sta_up(); ++i) {
-            page_history_t existing;
-            if ((i && page_history_get(&date, &existing)) || fetch_history(&date)) ++stored;
-            ++date.tm_mday;
-            mktime(&date);
-        }
-        ESP_LOGI(TAG, "History available for %u of the next 7 dates", stored);
-    }
+    return result;
 }
 
 void page_network_refresh(void)
 {
-    if (s_sync_task) xTaskNotify(s_sync_task, PAGE_SYNC_NETWORK, eSetBits);
+    net_sync_request(NET_SYNC_TRIPS);
+}
+
+esp_err_t page_sync_history(struct tm date)
+{
+    if (!tf_card_is_mounted()) return ESP_ERR_INVALID_STATE;
+    unsigned stored = 0;
+    for (int i = 0; i < 7 && wifi_mgr_is_sta_up() && !net_sync_expired(); ++i) {
+        page_history_t existing;
+        if (page_history_get(&date, &existing)) {
+            ++stored;
+        } else if (fetch_history(&date)) {
+            ++stored;
+            if (i == 0) app_display_history_data_changed();
+        }
+        ++date.tm_mday;
+        mktime(&date);
+    }
+    ESP_LOGI(TAG, "未来七天历史缓存已覆盖 %u 天", stored);
+    return stored == 7 ? ESP_OK : ESP_ERR_NOT_FINISHED;
+}
+
+esp_err_t page_sync_trips(const struct tm *date, bool opened)
+{
+    if (!tf_card_is_mounted()) return ESP_ERR_INVALID_STATE;
+    char day[11];
+    strftime(day, sizeof(day), "%Y-%m-%d", date);
+    if (!opened) return fetch_trips(date, day);
+    page_trip_t trip;
+    if (!page_trip_get(date, &trip) || strcmp(trip.arrival_date, day)) return ESP_OK;
+    bool changed;
+    const esp_err_t result = fetch_trip_weather(&trip, day, true, &changed);
+    if (changed) app_display_trip_data_changed();
+    return result;
 }
 
 void page_trip_opened(void)
 {
-    if (s_sync_task && wifi_mgr_is_sta_up())
-        xTaskNotify(s_sync_task, PAGE_SYNC_TRIP_OPEN, eSetBits);
+    if (wifi_mgr_is_sta_up()) net_sync_request(NET_SYNC_TRIP_OPEN);
 }
 
 esp_err_t page_data_init(void)
@@ -727,5 +779,5 @@ esp_err_t page_data_init(void)
         }
         if (seeded) ESP_LOGI(TAG, "Seeded %u Wikimedia SD history dates", seeded);
     }
-    return xTaskCreate(sync_task, "page_net", 8192, NULL, 2, &s_sync_task) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    return ESP_OK;
 }

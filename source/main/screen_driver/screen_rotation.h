@@ -47,6 +47,8 @@ esp_err_t screen_rotation_toggle_blank(void);
 screen_mode_t screen_rotation_next_mode(uint8_t enabled);
 screen_mode_t screen_rotation_current_mode(void);
 uint8_t screen_rotation_available_modes(void);
+unsigned screen_rotation_render_orientation(void);
+esp_err_t screen_rotation_redraw_current(void);
 esp_err_t screen_rotation_show_mode(screen_mode_t mode);
 bool screen_rotation_shortcut_active(void);
 esp_err_t screen_rotation_toggle_shortcut(screen_mode_t page, screen_mode_t fallback);

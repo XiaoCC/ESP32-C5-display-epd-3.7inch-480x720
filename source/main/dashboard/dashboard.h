@@ -43,8 +43,8 @@ esp_err_t dashboard_todo_get(char *body, size_t size);
 esp_err_t dashboard_todo_set(const char *body);
 esp_err_t dashboard_todo_render_data(uint8_t *bitmap, unsigned *count, unsigned *done, unsigned *zoom,
     char due[TODO_MAX_ITEMS][TODO_DUE_BYTES]);
-esp_err_t dashboard_weather_fetch(int64_t deadline);
-bool dashboard_weather_claim_today(void);
+esp_err_t dashboard_weather_fetch(int64_t deadline, bool *changed);
+bool dashboard_weather_due(bool record_success);
 bool dashboard_weather_offline(void);
 esp_err_t dashboard_weather_set_offline(bool offline);
 void dashboard_weather_use_cache(void);

@@ -237,7 +237,7 @@ esp_err_t screen_ui_show_wifi_qr(const char *ssid, const char *url)
 {
     char payload[72];
     snprintf(payload, sizeof(payload), "WIFI:T:nopass;S:%s;;", ssid);
-    return show_qr("Scan to join device WiFi", url, payload, true);
+    return show_qr("HOTSPOT MAY SHIFT", url, payload, true);
 }
 
 esp_err_t screen_ui_show_setup(const char *url)

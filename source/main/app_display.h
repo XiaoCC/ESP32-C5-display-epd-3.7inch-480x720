@@ -10,5 +10,7 @@ void app_display_wifi_off(void);
 void app_display_schedule_changed(void);
 bool app_display_refresh_weather(void);
 void app_display_trip_data_changed(void);
+void app_display_history_data_changed(void);
+void app_display_weather_data_changed(void);
 
 #endif
