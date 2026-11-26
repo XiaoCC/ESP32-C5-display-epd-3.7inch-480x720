@@ -219,6 +219,7 @@
         const syncMessage = ref('');
         const syncActionBusy = ref(false);
         const syncStart = ref('03:30');
+        const syncDaily = ref(true), syncAutoClose = ref(false);
         const syncEnd = ref('05:30');
         const formatSyncTime = value => value > 0
           ? new Date(value * 1000).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai'}) : '—';
@@ -232,6 +233,8 @@
             syncStatus.value = data;
             if (readWindow) {
               syncStart.value = formatMinute(data.start);
+              syncDaily.value = data.daily !== false;
+              syncAutoClose.value = data.auto_close === true;
               syncEnd.value = formatMinute(data.end);
             }
           } catch (_) { syncStatus.value = {}; }
@@ -250,12 +253,12 @@
         const saveSyncWindow = () => {
           const parseMinute = text => /^\d{2}:\d{2}$/.test(text)
             ? Number(text.slice(0,2))*60 + Number(text.slice(3)) : -1;
-          const start = parseMinute(syncStart.value), end = parseMinute(syncEnd.value);
+          const start = parseMinute(syncStart.value), end = (start + 15) % 1440;
           if (start < 0 || end < 0 || start === end) {
             syncMessage.value = '请输入不同的起止时间';
             return;
           }
-          return postSync({start,end}, '同步窗口已保存');
+          return postSync({start,end,daily:syncDaily.value,auto_close:syncAutoClose.value}, '同步窗口已保存');
         };
 
         const sixDenoiseModes = [
@@ -407,7 +410,7 @@
           ctx.font = `600 ${fontSize.value}px "Songti SC","Noto Serif SC","PingFang SC","Microsoft YaHei",serif`;
           const lines = wrapLines(ctx, text.value, PANEL_W - 56);
           const lineH = fontSize.value * 1.25;
-          let y = (PANEL_H - lines.length * lineH) / 2 + lineH / 2;
+          let y = Math.max(42 + lineH / 2, (PANEL_H - lines.length * lineH) / 2 + lineH / 2);
           for (const line of lines) {
             ctx.fillText(line, PANEL_W / 2, y);
             y += lineH;
@@ -1849,7 +1852,7 @@
           panelWidth, panelHeight, panelRotation, tab, text, bg, fg, fontSize, busy, busyLabel, status, statusClass, colors,
           canvas, appearanceCanvas, fileInput, imageName, imageEl, imgW, imgH, quant, dragging,
           inkColors, inkAlgorithm, inkStrength, inkCap, inkSerpentine, conversionProgress, photoPreset, showOriginal,
-          paletteMessage, savePalette, restorePalette, calibrationBusy, calibrationPatch, calibrationPhoto, sampleTarget, openCalibrationPhoto, sampleCalibration, inkEngine, advancedInk, scheduleDither, syncStatus, statusDetails, syncMessage, syncActionBusy, syncStart, syncEnd,
+          paletteMessage, savePalette, restorePalette, calibrationBusy, calibrationPatch, calibrationPhoto, sampleTarget, openCalibrationPhoto, sampleCalibration, inkEngine, advancedInk, scheduleDither, syncStatus, statusDetails, syncMessage, syncActionBusy, syncStart, syncEnd, syncDaily, syncAutoClose,
           formatSyncTime, syncLabel, syncNow, saveSyncWindow,
           previewPixels, noisePreviews, noisePreviewBusy, ditherQuality, ditherModes, sixDenoise, sixDenoiseModes, setSixDenoise, onNoiseCompareToggle,
           deviceOnline, batteryLevel, lowBattery, internetConfirmed, renderStyle, renderStyles, previewBusy, usedColors, draggingFile,

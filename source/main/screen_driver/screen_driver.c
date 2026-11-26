@@ -449,8 +449,11 @@ static void stamp_wifi(uint8_t *bytes, size_t size, size_t offset, unsigned rota
             const bool ink = radius <= 6 || (dy > 0 && dx >= -dy && dx <= dy &&
                 ((radius >= 49 && radius <= 81) || (radius >= 144 && radius <= 196) ||
                  (radius >= 289 && radius <= 361)));
+            if (!ink) continue;
             const unsigned shift = bit ? 0 : 4;
-            const unsigned color = ink ? SCREEN_COLOR_BLACK : SCREEN_COLOR_WHITE;
+            const unsigned original = (bytes[i] >> shift) & 0xFu;
+            const unsigned color = original == SCREEN_COLOR_BLACK || original == SCREEN_COLOR_BLUE ?
+                SCREEN_COLOR_WHITE : SCREEN_COLOR_BLACK;
             bytes[i] = (bytes[i] & ~(0xFu << shift)) | (color << shift);
         }
     }

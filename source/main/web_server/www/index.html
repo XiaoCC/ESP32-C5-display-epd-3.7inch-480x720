@@ -110,8 +110,10 @@
       <details>
         <summary>高级同步设置与诊断</summary>
         <form class="todo-actions" @submit.prevent="saveSyncWindow">
-          <label>开始 <input type="time" v-model="syncStart" required></label>
-          <label>结束 <input type="time" v-model="syncEnd" required></label>
+          <label><input type="checkbox" v-model="syncDaily">每日定时联网</label>
+          <label>开启时间 <input type="time" v-model="syncStart" required></label>
+          <label><input type="checkbox" v-model="syncAutoClose">手动开启 Wi-Fi 后 15 分钟自动关闭</label>
+          <p class="hint">定时联网开始后立即同步，约 15 分钟后关闭。</p>
           <button class="ghost-btn" :disabled="!deviceOnline || syncActionBusy">保存同步窗口</button>
         </form>
         <p class="hint">低于 10% 时暂停自动同步。时段以北京时间为准。打开热点管理期间，关闭请求会等正在运行的同步结束。</p>

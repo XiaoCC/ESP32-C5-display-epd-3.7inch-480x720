@@ -22,5 +22,6 @@ bool net_sync_expired(void);
 bool net_sync_busy(void);
 esp_err_t net_sync_open_management(void);
 bool net_sync_close_management(void);
-esp_err_t net_sync_set_window(unsigned start, unsigned end);
+esp_err_t net_sync_set_window(unsigned start, unsigned end, int daily, int auto_close);
+bool net_sync_auto_close(void);
 int net_sync_status(char *out, size_t size);

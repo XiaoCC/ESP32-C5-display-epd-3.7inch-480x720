@@ -38,3 +38,8 @@ Built with ESP-IDF v5.5.4. The ZIP includes source, flash images, checksums and 
 ### v2026.11.25.1 预发布
 
 加入实验性 OKLab 量化、色板取样和 SD 校验存储。合成基准下经典保持默认。
+
+
+### v2026.11.26.1
+
+在「状态与网络 → 高级同步设置与诊断」设置每日联网时间。定时联网立即同步，约 15 分钟后关闭。手动联网可选 15 分钟自动关闭。照片上的 Wi-Fi 图标不再绘制底色。

@@ -628,7 +628,11 @@ static esp_err_t sync_handler(httpd_req_t *req)
             err = ESP_OK;
         } else if (cJSON_IsNumber(start) && cJSON_IsNumber(end) &&
                 start->valueint == start->valuedouble && end->valueint == end->valuedouble) {
-            err = net_sync_set_window(start->valueint, end->valueint);
+            const cJSON *daily = cJSON_GetObjectItemCaseSensitive(json, "daily");
+            const cJSON *close = cJSON_GetObjectItemCaseSensitive(json, "auto_close");
+            err = net_sync_set_window(start->valueint, end->valueint,
+                cJSON_IsBool(daily) ? cJSON_IsTrue(daily) : -1,
+                cJSON_IsBool(close) ? cJSON_IsTrue(close) : -1);
         }
         cJSON_Delete(json);
         if (err != ESP_OK) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "同步设置无效或保存失败");

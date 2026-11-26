@@ -84,3 +84,8 @@ Open an issue or PR to share a solution for unfinished upstream features, docume
 ### v2026.11.25.1 photo processing
 
 Legacy remains the default after synthetic benchmarks. Fine, Sharp and Vivid are available as experimental profiles. Use the advanced display calibration controls to show ink patches, sample a white card and save the palette. Calibrate under even lighting at the operating temperature.
+
+
+### v2026.11.26.1
+
+Configure a daily Wi-Fi start time in Status and Network. Scheduled Wi-Fi starts syncing immediately and closes around 15 minutes later. Manual Wi-Fi can optionally use the same timeout. The Wi-Fi icon has no rectangular background.

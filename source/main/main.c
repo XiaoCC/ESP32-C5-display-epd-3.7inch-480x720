@@ -223,6 +223,7 @@ static void screen_task(void *arg)
     int64_t quote_retry_at = 0;
     bool pairing = false;
     bool wifi_icon = false;
+    int64_t management_started = 0;
     int64_t lan_qr_until = 0;
     int last_trip_cleanup = -1;
     while (1) {
@@ -270,7 +271,8 @@ static void screen_task(void *arg)
         xTaskNotifyWait(0, UINT32_MAX, &events, wait_ms == INT32_MAX ? portMAX_DELAY :
             pdMS_TO_TICKS(wait_ms > 10 ? wait_ms : 10));
         const bool power = events & SCREEN_EVENT_POWER_TOGGLE;
-        if (s_management && (events & (SCREEN_EVENT_WIFI | SCREEN_EVENT_WIFI_OFF))) {
+        if (s_management && ((events & (SCREEN_EVENT_WIFI | SCREEN_EVENT_WIFI_OFF)) ||
+                (net_sync_auto_close() && esp_timer_get_time() - management_started >= 15 * US_PER_MINUTE))) {
             s_management_close_pending = true;
             events &= ~SCREEN_EVENT_WIFI;
             ESP_LOGI(TAG, "收到关闭 Wi-Fi 请求，等待同步及网页任务完成");
@@ -337,6 +339,8 @@ static void screen_task(void *arg)
         if (events & SCREEN_EVENT_WIFI) {
             if (net_sync_open_management() == ESP_OK) {
                 s_management = true;
+                management_started = esp_timer_get_time();
+                if (wifi_mgr_is_sta_up()) net_sync_request(NET_SYNC_ALL | NET_SYNC_LINK);
                 const screen_mode_t page = screen_rotation_current_mode();
                 if (page < SCREEN_MODE_COUNT) page_before_management = page;
                 lock_idle_display();
