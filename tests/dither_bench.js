@@ -38,7 +38,7 @@ const settings={style:'photo',quality:'best',denoise:'balanced',colors:p.PANEL_C
 const base1=blur(input,1),base15=blur(input,1.5);
 const stats=[];
 const panels=[];
-for(const engine of ['legacy','fine','sharp','vivid']){
+for(const engine of ['legacy','clean','fine','sharp','vivid']){
  const start=performance.now(),q=p.quantize(input,{...settings,engine}),ms=performance.now()-start;
  assert.ok(q.ids.every(v=>palette.has(v)));
  assert.equal(p.makeFrame(q.ids).body.length,172800);
@@ -66,6 +66,9 @@ for(const engine of ['legacy','fine','sharp','vivid']){
  ssim:ssim.toFixed(4),isolated,band:(bands/(width-2)).toFixed(5)});
  panels.push(q.preview);
 }
+assert.ok(stats.find(row=>row.engine==='clean').isolated < stats.find(row=>row.engine==='legacy').isolated);
+assert.deepEqual(p.quantize(input,{...settings,engine:'clean'}).preview,panels[1]);
+assert.throws(()=>p.quantize(input,{...settings,engine:'clean',canceled:()=>true}), {name:'AbortError'});
 console.table(stats);
 if(process.argv[2]){
  const out=Buffer.alloc(size*panels.length*3);

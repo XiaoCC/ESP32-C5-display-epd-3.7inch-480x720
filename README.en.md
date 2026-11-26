@@ -89,3 +89,11 @@ Legacy remains the default after synthetic benchmarks. Fine, Sharp and Vivid are
 ### v2026.11.26.1
 
 Configure a daily Wi-Fi start time in Status and Network. Scheduled Wi-Fi starts syncing immediately and closes around 15 minutes later. Manual Wi-Fi can optionally use the same timeout. The Wi-Fi icon has no rectangular background.
+
+
+### v2026.11.26.2
+
+The optional Clean Six-Ink preset suppresses isolated chromatic dots in flat areas using the current palette. Legacy remains the default. Existing settings, SD files and the frame protocol remain compatible. [FrameFilm / ForFilm](docs/framefilm-analysis.md)
+
+
+Inspired by ForFilm’s six-ink workflow, separate preview and editor, and visible job progress. No upstream code, UI assets, or palette values were imported. FrameFilm is GPL-3.0. [FrameFilm / ForFilm](https://github.com/kirmisaki/FrameFilm/tree/main/tools/ForFilm)

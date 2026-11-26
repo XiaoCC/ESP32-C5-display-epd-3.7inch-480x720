@@ -43,3 +43,11 @@ Built with ESP-IDF v5.5.4. The ZIP includes source, flash images, checksums and 
 ### v2026.11.26.1
 
 在「状态与网络 → 高级同步设置与诊断」设置每日联网时间。定时联网立即同步，约 15 分钟后关闭。手动联网可选 15 分钟自动关闭。照片上的 Wi-Fi 图标不再绘制底色。
+
+
+### v2026.11.26.2
+
+新增可选「六色净化」照片预设。保持经典默认、分区与帧格式，手机性能和实屏效果待测。 [FrameFilm / ForFilm](docs/framefilm-analysis.md)
+
+
+参考 ForFilm 的六色处理顺序、分栏预览和任务状态呈现。HueLeaf 独立实现，未复制上游代码、界面资源或色板。FrameFilm 使用 GPL-3.0。 [FrameFilm / ForFilm](https://github.com/kirmisaki/FrameFilm/tree/main/tools/ForFilm)

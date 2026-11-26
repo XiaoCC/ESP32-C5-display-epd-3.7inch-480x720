@@ -255,3 +255,11 @@ macOS 把 `COM4` 换成实际的 `/dev/cu.*` 端口。需要编译并写入引�
 ### v2026.11.26.1
 
 在「状态与网络 → 高级同步设置与诊断」设置每日联网时间。定时联网立即同步，约 15 分钟后关闭。手动联网可选 15 分钟自动关闭。照片上的 Wi-Fi 图标不再绘制底色。
+
+
+### v2026.11.26.2
+
+照片页新增可选的「六色净化」，用设备色板抑制平坦色块里的少量异色点。经典仍为默认，旧配置、SD 卡及帧格式可继续使用。 [FrameFilm / ForFilm](docs/framefilm-analysis.md)
+
+
+参考 ForFilm 的六色处理顺序、分栏预览和任务状态呈现。HueLeaf 独立实现，未复制上游代码、界面资源或色板。FrameFilm 使用 GPL-3.0。 [FrameFilm / ForFilm](https://github.com/kirmisaki/FrameFilm/tree/main/tools/ForFilm)

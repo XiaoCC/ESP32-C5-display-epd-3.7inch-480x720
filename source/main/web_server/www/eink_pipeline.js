@@ -426,7 +426,40 @@
     return {ids,preview};
   }
 
+  // 从稳定的经典结果出发，仅在源图平坦区抑制孤立的异色墨点。
+  function* quantizeClean(rgba, options) {
+    const {width,height}=logicalSize();
+    const seed=quantizeLegacy(rgba,{...options,colors:options.colors || PANEL_COLORS});
+    let progress=seed.next();
+    while(!progress.done){yield progress.value*.85;progress=seed.next();}
+    const result=progress.value;
+    const inks=buildPalette(options.colors || PANEL_COLORS);
+    const lookup=Array.from({length:7},(_,id)=>inks.find(ink=>ink.id===id));
+    const original=result.ids.slice();
+    for(let y=1;y<height-1;y++){
+      if(options.canceled?.()) throw canceledError();
+      for(let x=1;x<width-1;x++){
+        const i=y*width+x, k=i*4, ink=original[i];
+        const adjacent=[i-1,i+1,i-width,i+width];
+        const replacement=original[adjacent[0]];
+        if(ink<2||replacement<2||replacement===ink||!adjacent.every(j=>original[j]===replacement)) continue;
+        if(!adjacent.every(j=>Math.max(Math.abs(rgba[j*4]-rgba[k]),
+            Math.abs(rgba[j*4+1]-rgba[k+1]),Math.abs(rgba[j*4+2]-rgba[k+2]))<=7)) continue;
+        const a=lookup[ink],b=lookup[replacement];
+        const rgb=[linear[rgba[k]],linear[rgba[k+1]],linear[rgba[k+2]]];
+        const error=(rgb, ref)=>.3*(rgb[0]-ref[0])**2+.5*(rgb[1]-ref[1])**2+.2*(rgb[2]-ref[2])**2;
+        const mixed=b.lin.map((v,c)=>(v*4+a.lin[c])/5);
+        if(error(rgb,b.lin)>error(rgb,mixed)) continue;
+        result.ids[i]=replacement;
+        result.preview.set(b.rgb,k);
+      }
+      if((y&15)===15) yield .85+.15*(y+1)/height;
+    }
+    return result;
+  }
+
   function* quantizeSteps(rgba, options={}) {
+    if(options.engine==='clean') return yield* quantizeClean(rgba,options);
     if(!options.engine||options.engine==='legacy')
       return yield* quantizeLegacy(rgba,options);
     return yield* quantizeV2(rgba,options);

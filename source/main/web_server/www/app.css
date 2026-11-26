@@ -602,3 +602,13 @@ summary { cursor:pointer; padding:.55rem 0; }
 }
 .save-dock .push { width:auto; margin:0; min-height:44px; }
 .save-dock .status:empty { display:none; }
+
+.wifi-schedule { background:var(--field); border:1px solid var(--line); border-radius:10px; padding:1rem; margin-block:1rem; }
+.wifi-schedule h2 { margin:0 0 .65rem; font-size:1rem; }
+.wifi-schedule form { align-items:center; }
+.media-workspace .preview-pane { border-radius:12px; background:var(--field); padding:1rem; }
+.media-workspace .editor-controls { min-width:0; }
+.tabs button:focus-visible,.ghost-btn:focus-visible,.push:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+@media (min-width: 900px) and (min-height: 700px) {
+  .media-workspace .preview-pane { position:sticky; top:1rem; }
+}

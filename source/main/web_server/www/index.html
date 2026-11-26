@@ -107,8 +107,8 @@
       <p class="status" role="status">{{ syncMessage }}</p>
       <p class="hint" v-if="statusDetails.refresh_count >= 50">已累计 {{ statusDetails.refresh_count }} 次面板刷新。如有残影，可在屏幕编辑页执行全屏清白。</p>
       <p class="hint" v-if="syncStatus.radio_seconds">本次开机同步用时累计 {{ syncStatus.radio_seconds }} 秒</p>
-      <details>
-        <summary>高级同步设置与诊断</summary>
+      <section class="wifi-schedule" aria-label="定时 Wi-Fi">
+        <h2>定时 Wi-Fi</h2>
         <form class="todo-actions" @submit.prevent="saveSyncWindow">
           <label><input type="checkbox" v-model="syncDaily">每日定时联网</label>
           <label>开启时间 <input type="time" v-model="syncStart" required></label>
@@ -117,6 +117,9 @@
           <button class="ghost-btn" :disabled="!deviceOnline || syncActionBusy">保存同步窗口</button>
         </form>
         <p class="hint">低于 10% 时暂停自动同步。时段以北京时间为准。打开热点管理期间，关闭请求会等正在运行的同步结束。</p>
+      </section>
+      <details>
+        <summary>同步诊断</summary>
         <ul class="sync-log">
           <li v-for="(record, index) in syncStatus.logs" :key="index">
             {{ formatSyncTime(record[0]) }} · {{ syncLabel(record[1]) }} · {{ record[2] ? '错误 ' + record[2] : '完成' }}
@@ -477,7 +480,7 @@
 
     </div>
 
-    <div v-show="tab === 'text' || tab === 'image'" class="editor-layout">
+    <div v-show="tab === 'text' || tab === 'image'" class="editor-layout media-workspace">
       <section class="preview-pane" aria-label="屏幕预览">
         <div class="preview-heading"><strong>屏幕预览</strong><span>480 × 720</span></div>
         <div class="preview-frame" :class="{ dragging, 'has-img': imageEl, 'pixel-inspect': previewPixels }"
@@ -493,7 +496,7 @@
         </div>
         <div v-if="tab === 'image' && imageEl" class="preview-controls">
           <label><input type="checkbox" v-model="showOriginal" @change="scheduleDither">查看原始取景</label>
-          <label><input type="checkbox" v-model="previewPixels" :disabled="showOriginal">查看抖动像素</label><span>{{ usedColors }} / 6 色</span>
+          <label><input type="checkbox" v-model="previewPixels" :disabled="showOriginal">查看抖动像素</label><span><span v-if="previewBusy" role="status">转换 {{ conversionProgress }}%</span> <span v-else>{{ usedColors }} / 6 色</span></span>
         </div>
         <p class="preview-tip">{{ tab === 'text' ? '预览仅供参考，实屏颜色受环境光影响。' : imageEl ? '拖动调整取景 · 滚轮缩放 · 实屏颜色受环境光影响' : '图片在本地浏览器处理，发送时仅上传六色点阵。' }}</p>
       </section>
@@ -630,7 +633,7 @@
         </div>
 
         <label>照片算法 <select v-model="inkEngine" @change="scheduleDither">
-          <option value="fine">细腻</option><option value="sharp">锐利</option>
+          <option value="clean">六色净化</option><option value="fine">细腻</option><option value="sharp">锐利</option>
           <option value="vivid">鲜艳</option><option value="legacy">经典</option>
         </select></label>
         <details class="ink-settings">
@@ -655,7 +658,7 @@
             <label><input type="checkbox" v-model="inkSerpentine" @change="scheduleDither">蛇形扫描</label>
             <button type="button" class="ghost-btn" :disabled="!deviceOnline || busy" @click="savePalette">保存色板到设备</button>
           </div>
-          <div v-if="inkEngine !== 'legacy'" class="sync-grid">
+          <div v-if="inkEngine !== 'legacy' && inkEngine !== 'clean'" class="sync-grid">
             <label v-for="spec in [['tone','色调映射',1],['vivid','色度',2],['wL','亮度权重',2],['wC','色度权重',2],['noise','阈值扰动',.4],['edge','边缘保护',1],['sharpness','锐化',1],['localContrast','局部对比',1]]" :key="spec[0]">
               {{ spec[1] }} <input type="number" min="0" :max="spec[2]" step=".05" v-model.number="advancedInk[spec[0]]" @change="scheduleDither">
             </label>

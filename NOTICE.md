@@ -9,3 +9,6 @@
 - 历史上的今天通过接口盒子查询指定日期的事件标题。旧缓存和内置种子仍按中文维基百科署名。 [接口盒子文档](https://www.apihz.cn/api/zicitoday.html) · [维基媒体使用条款](https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use/zh)
 - 默认摘句随条目记录作品及作者，来源见随包代码。 [Project Gutenberg](https://www.gutenberg.org/) · [中国哲学书电子化计划](https://ctext.org/zhs)
 
+
+
+参考 ForFilm 的六色处理顺序、分栏预览和任务状态呈现。HueLeaf 独立实现，未复制上游代码、界面资源或色板。FrameFilm 使用 GPL-3.0。 [FrameFilm / ForFilm](https://github.com/kirmisaki/FrameFilm/tree/main/tools/ForFilm)

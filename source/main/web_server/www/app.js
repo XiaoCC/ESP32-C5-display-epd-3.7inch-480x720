@@ -445,7 +445,7 @@
           }
           if (drawOnly) return scratch;
           const imgData = ctx.getImageData(0, 0, PANEL_W, PANEL_H);
-          if(inkEngine.value==='legacy') applyAdjust(imgData.data, {
+          if(['legacy','clean'].includes(inkEngine.value)) applyAdjust(imgData.data, {
             exposure: exposure.value,
             brightness: brightness.value,
             contrast: contrast.value,
